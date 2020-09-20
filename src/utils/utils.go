@@ -24,11 +24,11 @@ var (
 
 type BitMap struct {
 	maps     []uint64
-    emptyBit []uint64
-	myLength int
+	emptyBit []uint64
+	myLength uint32
 }
 
-func NewBitMap(length int) (*BitMap, error) {
+func NewBitMap(length uint32) (*BitMap, error) {
 
 	if length < 1 || length > BIT_MAP_MAX_LENGTH {
 		return nil, fmt.Errorf("Invalid bit map length!")
@@ -40,12 +40,12 @@ func NewBitMap(length int) (*BitMap, error) {
 }
 
 func (b *BitMap) init(length uint32) {
-    mapLength := length/64
+	mapLength := length / 64
 	if length%64 != 0 {
-        mapLength += 1
+		mapLength += 1
 	}
-    b.maps = make([]uint64, mapLength)
-    b.emptyBit = make([]uint64, mapLength)
+	b.maps = make([]uint64, mapLength)
+	b.emptyBit = make([]uint64, mapLength)
 	b.myLength = length
 }
 
@@ -60,7 +60,7 @@ func (b *BitMap) Get(index uint32) bool {
 }
 
 func (b *BitMap) Clear() {
-    copy(b.maps, b.emptyBit)
+	copy(b.maps, b.emptyBit)
 }
 
 func DoesDirExist(path string) bool {
@@ -186,8 +186,8 @@ func TranUTCTimeStringToTimeStamp(utcTimeString, oldTimeForm string) (int64, err
 func StringToInt(str string, mode int) int {
 	val := int(crc32.ChecksumIEEE([]byte(str)))
 	if val >= 0 {
-		return val%mode
+		return val % mode
 	} else {
-		return (-val)%mode
+		return (-val) % mode
 	}
 }

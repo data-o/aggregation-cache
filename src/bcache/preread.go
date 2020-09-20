@@ -14,92 +14,99 @@ package bcache
 
 import (
 	"fmt"
-	"strings"
-	"sync"
-    "sync/atomic"
+	"io/ioutil"
+	"net/http"
 )
 
 import (
-    "utils"
+	"utils"
 )
 
 type readInfo struct {
-    dltId uint32
-    datasetId uint32
-    groupId uint32
-    fileId uint32
+	dltId     uint32
+	datasetId uint32
+	groupId   uint32
+	fileId    uint32
 }
 
+func (g *DLTGroup) preReadProcess() {
+	for g.group.allowCacheSize > g.group.cachedSize {
+		g.lock.Lock()
+		fileId, ok := g.getRandomUnreadedFile()
+		if !ok { // don't have unread file
+			g.group.cond.Wait() // wait unread file
+			g.lock.Unlock()
+			continue
+		}
 
-type readThread struct {
-    dataset *Dataset
-    readQueue chan *readInfo
-}
+		g.lock.Unlock()
+		node, err := readFromBackend(g.dlt.dataset, g.dlt.id, g.dlt.dataset.id, g.group.id, fileId)
+		if err != nil {
+			g.lock.Lock()
+			g.addUnreadedFile(fileId)
+			g.lock.Unlock()
+		}
 
-
-
-func (d *Dataset) singleReadthread(threadId int) {
-    var (
-        err error
-    )
-
-    for info := range d.prereadPool {
-        node := d.cachedFiles[info.fileId]
-        if  node == nil {
-            node, err = readFromBackend(info.dltId, info.datasetId, info.groupId, info.fileId)
-            if err != nil {
-                fmt.Println("failed read from backe", err)
-            }
-            d.cachedFiles[info.fileId] = node
-        }
-
-        dlt, ok := m.dlts.Load(info.dltId)
-        if !ok {
-            fmt.Println("failed get job id", info.dltId)
-        }
-
-        group := &(dlt.groups[info.groupId])
-
-        group.addFileToCache(node)
-    }
-}
-
-func (d *Dataset) getFreeGroup() {
-
-
-
+		g.lock.Lock()
+		g.group.dataset.cachedFiles[fileId] = node
+		g.addFileToCache(node)
+		g.lock.Unlock()
+	}
 }
 
 func (d *Dataset) PrereadStart(threadNum int) {
-    d.prereadPool = make(chan *readInfo,  PREREAD_QUEUE_LENGTH)
+	d.clients = make([]*http.Client, confHttpClientNum)
+	for i := 0; i < confHttpClientNum; i++ {
+		d.clients[i] = utils.NewHttpClient()
+	}
 
-    for i := 0; i < threadNum; i ++ {
-        go d.singleReadthread(i)
-    }
+	for i := GROUP_LEVEL*2 - 1; i >= 0; i-- {
+		groupHead := d.leftGroupLevel[i]
+		if groupHead == nil {
+			continue
+		}
 
-    for i := GROUP_LEVEL*2 - 1; i >= 0; i-- {
-        groupHead := d.leftGroupLevel[i]
-        if groupHead == nil {
-            continue
-        }
-
-        tempGroup := groupHead
-        for tempGroup != nil {
-            if tempGroup.allowCacheSize > tempGroup.cachedSize {
-                fileId, ok := tempGroup.getRandomUnreadedFile()
-                d.prereadPool 
-            } else {
-
-            }
-            if !ok { // don't have unread file
-
-            }
-        }
-    }
+		tempGroup := groupHead
+		for tempGroup != nil {
+			// master dlt start preprocess
+			go d.masterDLT.groups[tempGroup.id].preReadProcess()
+			tempGroup = tempGroup.next
+		}
+	}
 }
 
-func readFromBackend(dltId, datasetId, groupId, fileId uint32) (*FileNode, error) {
+func readFromBackend(dataset *Dataset, dltId, datasetId, groupId, fileId uint32) (*FileNode, error) {
+	httpClient := dataset.clients[groupId%confHttpClientNum]
+	endpoint := confEndpoints[groupId%confEndpointNum]
+	prefix := fmt.Sprintf("/%d/%d", datasetId, fileId)
+	query := fmt.Sprintf("group=%d&dlt=%d", groupId, dltId)
+	httpRequest := utils.NewHttpRequest(defaultHttpScheme, endpoint, prefix, query)
+	httpRequest.Method = http.MethodGet
+	httpClient.Timeout = defaultRequestTimeOut
 
+	httpResponse, err := httpClient.Do(httpRequest)
+	if err != nil {
+		return nil, err
+	} else if httpResponse == nil {
+		return nil, fmt.Errorf("http response is empty!")
+	}
+
+	defer httpResponse.Body.Close()
+	if httpResponse.StatusCode != 200 {
+		message, _ := ioutil.ReadAll(httpResponse.Body)
+		return nil, fmt.Errorf("Http code %d, message %s!", httpResponse.StatusCode, message)
+	}
+
+	data, err := ioutil.ReadAll(httpResponse.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	node := &FileNode{
+		fileId:   fileId,
+		cached:   true,
+		fileSize: uint64(httpResponse.ContentLength),
+		body:     data,
+	}
+	return node, nil
 }
-
-

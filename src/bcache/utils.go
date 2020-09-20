@@ -11,7 +11,3 @@
 // and limitations under the License.
 
 package bcache
-
-import (
-)
-

@@ -16,10 +16,26 @@ import (
 	"fmt"
 )
 
+import (
+	"bcache"
+)
+
 const (
 	TEST_VERSION = "0.0.1"
 )
 
 func main() {
-    fmt.Println(TEST_VERSION)
+	var (
+		jobId uint32 = 1
+	)
+	datasetName := "imagenet"
+	maxCacheSize := (uint64(80) << 30)
+
+	dm := bcache.NewDatasetManager()
+	dlt, err := dm.Start(datasetName, jobId, maxCacheSize)
+	if err != nil {
+		fmt.Println("error in main", err)
+	} else {
+		fmt.Println(dlt)
+	}
 }

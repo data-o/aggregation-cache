@@ -12,20 +12,37 @@
 
 package bcache
 
-const (
-	DEFAULT_FILE_SHARD = 100
-    GROUP_LEVEL = 100
-    VAL_GROUP_ID_START = 1000000
-    PREREAD_QUEUE_LENGTH = 10000
+import (
+	"time"
 )
 
 const (
-   CODE_OK = 0
-   CODE_NOT_FOUND = 404
-   CODE_EMPTY = 10000
-   CODE_DLT_NOT_INIT = 10001
+	DEFAULT_FILE_SHARD   = 100
+	GROUP_LEVEL          = 100
+	VAL_GROUP_ID_START   = 1000000
+	PREREAD_QUEUE_LENGTH = 10000
+
+	HEADER_LAST_MODIFIED = "Last-Modified"
+	S3_TIME_FORMAT       = "Mon, 02 Jan 2006 15:04:05 GMT"
+)
+
+type ErrorCode int
+
+const (
+	CODE_OK           = 0
+	CODE_NOT_FOUND    = 404
+	CODE_EMPTY        = 10000
+	CODE_DLT_NOT_INIT = 10001
 )
 
 const (
-    conf_cache_val = false
+	confCacheVal          = false
+	confEndpointNum       = 2
+	confHttpClientNum     = 10
+	defaultRequestTimeOut = 1200 * time.Second
+	defaultHttpScheme     = "http"
+)
+
+var (
+	confEndpoints = [2]string{"192.168.0.1:8080", "192.168.0.2"}
 )
