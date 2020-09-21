@@ -11,3 +11,24 @@
 // and limitations under the License.
 
 package bcache
+
+import (
+	"math/rand"
+)
+
+// Generate a random bytes
+func GetRandomString(size int64) []byte {
+	var (
+		basicString = []byte("123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+		i           int64
+	)
+	retTemp := make([]byte, size)
+	basicLen := len(basicString)
+	// TODO optimize performance
+	for i = 0; i < size; i++ {
+		retTemp[i] = basicString[rand.Intn(basicLen)]
+	}
+	return retTemp
+}
+
+

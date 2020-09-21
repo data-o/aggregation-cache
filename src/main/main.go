@@ -14,6 +14,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 )
 
 import (
@@ -28,14 +29,17 @@ func main() {
 	var (
 		jobId uint32 = 1
 	)
-	datasetName := "imagenet"
-	maxCacheSize := (uint64(80) << 30)
+	datasetName := "imagenet1k"
+	maxCacheSize := (uint64(30) << 30)
 
 	dm := bcache.NewDatasetManager()
 	dlt, err := dm.Start(datasetName, jobId, maxCacheSize)
+
 	if err != nil {
 		fmt.Println("error in main", err)
 	} else {
-		fmt.Println(dlt)
+		dlt.Dump()
 	}
+
+	time.Sleep(1000 * time.Second)
 }

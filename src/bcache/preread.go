@@ -13,14 +13,25 @@
 package bcache
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
+	//"strconv"
 )
 
 import (
 	"utils"
 )
+
+var (
+	content []byte
+)
+
+func init() {
+	content = GetRandomString(100*1024)
+}
 
 type readInfo struct {
 	dltId     uint32
@@ -30,31 +41,51 @@ type readInfo struct {
 }
 
 func (g *DLTGroup) preReadProcess() {
-	for g.group.allowCacheSize > g.group.cachedSize {
+	var (
+		err error
+		node *FileNode
+	)
+	fmt.Println(" start proread ", g.group.id, g.group.allowCacheSize, g.group.cachedSize)
+	for true {
 		g.lock.Lock()
+		if g.group.allowCacheSize <= g.group.cachedSize {
+			// relase some mem
+			g.releaseMem()
+			if g.group.allowCacheSize <= g.group.cachedSize {
+				g.condPreread.Wait() // wait relase file
+				g.lock.Unlock()
+				continue
+			}
+		}
+
 		fileId, ok := g.getRandomUnreadedFile()
 		if !ok { // don't have unread file
-			g.group.cond.Wait() // wait unread file
+			fmt.Println("failed get unread file")
+			g.condPreread.Wait() // wait unread file
 			g.lock.Unlock()
 			continue
 		}
 
-		g.lock.Unlock()
-		node, err := readFromBackend(g.dlt.dataset, g.dlt.id, g.dlt.dataset.id, g.group.id, fileId)
-		if err != nil {
-			g.lock.Lock()
-			g.addUnreadedFile(fileId)
+		node = g.group.dataset.cachedFiles[fileId]
+		if node == nil || node.cached == false {
 			g.lock.Unlock()
-		}
+			// start get file from backend
+			g.prereadFileNum ++
+			node, err =  g.readFromBackend(fileId, true)
+			g.prereadFileNum --
+			if err != nil {
+				fmt.Println("failed to get file", fileId, "from backend", err)
+				continue
+			}
 
-		g.lock.Lock()
-		g.group.dataset.cachedFiles[fileId] = node
-		g.addFileToCache(node)
+			g.lock.Lock()
+		}
 		g.lock.Unlock()
 	}
 }
 
-func (d *Dataset) PrereadStart(threadNum int) {
+// TODO: for quick implementaion, each group start a goroutine
+func (d *Dataset) PrereadStart() {
 	d.clients = make([]*http.Client, confHttpClientNum)
 	for i := 0; i < confHttpClientNum; i++ {
 		d.clients[i] = utils.NewHttpClient()
@@ -75,38 +106,74 @@ func (d *Dataset) PrereadStart(threadNum int) {
 	}
 }
 
-func readFromBackend(dataset *Dataset, dltId, datasetId, groupId, fileId uint32) (*FileNode, error) {
-	httpClient := dataset.clients[groupId%confHttpClientNum]
-	endpoint := confEndpoints[groupId%confEndpointNum]
-	prefix := fmt.Sprintf("/%d/%d", datasetId, fileId)
-	query := fmt.Sprintf("group=%d&dlt=%d", groupId, dltId)
-	httpRequest := utils.NewHttpRequest(defaultHttpScheme, endpoint, prefix, query)
-	httpRequest.Method = http.MethodGet
-	httpClient.Timeout = defaultRequestTimeOut
+func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string, datasetId, fileId, groupId, 
+	dltId uint32, data []byte) (*[]byte, uint64, uint32, error) {
 
-	httpResponse, err := httpClient.Do(httpRequest)
-	if err != nil {
-		return nil, err
-	} else if httpResponse == nil {
-		return nil, fmt.Errorf("http response is empty!")
+	/** for test */
+	fileName := *(dataset.idToFilename[fileId])
+	datasetName := "images1"
+	prefix := "/"+datasetName+"/"+fileName
+
+	/* test end */
+
+	fmt.Println("read", prefix, "fileid", fileId, "groupId", groupId)
+
+	contentLen := rand.Uint64() % 102400
+	data = make([]byte, contentLen)
+	copy(data, content)
+	return &data, contentLen, fileId, nil
+
+
+
+	//prefix := fmt.Sprintf("/%d/%d/%d/%d", datasetId, fileId, groupId, dltId)
+	httpRequest := utils.NewHttpRequest(defaultHttpScheme, endpoint, prefix, "")
+	httpClient.Timeout = defaultRequestTimeOut
+	
+	// need send cache info to backend
+	//length := len(data)
+	length := 0
+	if length > 0 {
+		httpRequest.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+		httpRequest.ContentLength = int64(length)
+		httpRequest.Method = http.MethodPut
+	} else {
+		httpRequest.Method = http.MethodGet
 	}
 
+	// send request
+	httpResponse, err := httpClient.Do(httpRequest)
+	if err != nil {
+		return nil, 0, 0, err
+	} else if httpResponse == nil {
+		return nil, 0, 0, fmt.Errorf("http response is empty!")
+	}
+
+	// read data
 	defer httpResponse.Body.Close()
 	if httpResponse.StatusCode != 200 {
 		message, _ := ioutil.ReadAll(httpResponse.Body)
-		return nil, fmt.Errorf("Http code %d, message %s!", httpResponse.StatusCode, message)
+		return nil, 0, 0, fmt.Errorf("Http code %d, message %s!", httpResponse.StatusCode, message)
 	}
 
-	data, err := ioutil.ReadAll(httpResponse.Body)
+	// get size
+	size := uint64(httpResponse.ContentLength)
+
+	// get real file id
+	realFileIdStr := httpResponse.Header.Get(HEADER_REAL_FILE_ID)
+	if len(realFileIdStr) == 0 {
+		return nil, 0, 0, fmt.Errorf("can't get real file id")
+	}
+	//realFileId, err := strconv.ParseUint(realFileIdStr, 10, 32)
+	//if err != nil {
+	//	return nil, 0, 0, fmt.Errorf("can't get conv real file id %s", realFileIdStr)
+	//}
+
+	realFileId := fileId
+
+	body, err := ioutil.ReadAll(httpResponse.Body)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 
-	node := &FileNode{
-		fileId:   fileId,
-		cached:   true,
-		fileSize: uint64(httpResponse.ContentLength),
-		body:     data,
-	}
-	return node, nil
+	return &body, size, uint32(realFileId),  nil
 }

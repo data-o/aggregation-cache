@@ -24,4 +24,6 @@ mkdir output
 mv src/main/main "output/datao"
 chmod +x output/datao 
 
+cp output/datao ./test/
+
 echo "OK for build datao"
