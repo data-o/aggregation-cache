@@ -239,7 +239,6 @@ func (t *DLT) Get(fileName string) (*ReadRet, ErrorCode, error) {
 			return nil, code, err
 		}
 		atomic.AddUint32(&t.readDirectly, 1)
-		//typeread = 2
 	} else if group.prereadFileNum > 0 { // waiting for preread
 		atomic.AddInt32(&group.hasWiated, 1)
 		group.condWaitCache.Wait()
@@ -264,13 +263,22 @@ func (t *DLT) Get(fileName string) (*ReadRet, ErrorCode, error) {
 			Body:     node.Body,
 		}
 		atomic.AddUint32(&t.waitRead, 1)
-
-		//typeread = 3
 	} else {
 		if group.groupEpoch != atomic.LoadInt32(&t.epoch) {
 			group.newEpoch(t.epoch)
 			return nil, CODE_AGAIN, nil
 		}
+		fmt.Println("mid GroupId", group.group.id,
+			"file id", fileId,
+			"group filenum", group.group.fileNum,
+			"unreadFileNum", group.unreadFileNum,
+			"readedCachedFileNum", group.readedCachedFileNum,
+			"prereadFileNum", group.prereadFileNum,
+			"cachedFileNum", group.cachedFileNum,
+			"dlt.readedNum", t.readedFileNum,
+			"allowCacheSize", group.group.allowCacheSize,
+			"cacheSize", group.group.cachedSize,
+			"dlt.fileNum", t.fileNum)
 		return nil, CODE_EMPTY, fmt.Errorf("don't have unread file, when try to read %d", fileId)
 	}
 
@@ -416,11 +424,12 @@ func (g *DLTGroup) addUnreadedFile(fileId uint32) {
 }
 
 // must be protect by lock
-func (g *DLTGroup) addFileToCache(node *FileNode) {
+func (g *DLTGroup) addFileToCache(node *FileNode, isPreread bool) {
 	fileId := node.FileId
-	// if this file has been readed
+
 	// add to readed cache
-	if g.readedFilesCache.Get(fileId - g.group.startId) {
+	if g.readedFilesCache.Get(fileId-g.group.startId) || // if this file has been readed
+		!isPreread { // it is directly read
 		if g.group.allowCacheSize >= g.group.cachedSize {
 			g.readedCachedFiles[g.readedCachedFileNum] = fileId // may core
 			g.readedCachedFileNum++
@@ -600,7 +609,7 @@ func (g *DLTGroup) readFromBackend(fileId uint32, isPreread bool) (*ReadRet, Err
 		dataset.cachedFiles[ret.FileId] = node
 
 		// add to cache files
-		g.addFileToCache(node)
+		g.addFileToCache(node, isPreread)
 		if ret.FileId != fileId {
 			g.addUnreadedFile(fileId)
 		}

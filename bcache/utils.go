@@ -16,6 +16,11 @@ import (
 	"math/rand"
 )
 
+type mempools struct {
+	maxLength uint64
+	totalSize uint64
+}
+
 // Generate a random bytes
 func GetRandomString(size int64) []byte {
 	var (
