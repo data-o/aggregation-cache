@@ -22,7 +22,7 @@ import (
 )
 
 import (
-	"utils"
+	"github.com/data-o/aggregation-cache/utils"
 )
 
 type DatasetManager struct {

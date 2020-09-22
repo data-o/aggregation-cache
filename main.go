@@ -16,13 +16,13 @@ import (
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
+	"sync"
 	"time"
 )
 
 import (
-	"bcache"
-	"sync"
-	"utils"
+	"github.com/data-o/aggregation-cache/bcache"
+	"github.com/data-o/aggregation-cache/utils"
 )
 
 const (

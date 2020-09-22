@@ -23,18 +23,8 @@ import (
 )
 
 import (
-	"utils"
+	"github.com/data-o/aggregation-cache/utils"
 )
-
-/*
-var (
-	content []byte
-)
-
-func init() {
-	content = GetRandomString(200*1024)
-}
-*/
 
 type readInfo struct {
 	dltId     uint32

@@ -19,7 +19,7 @@ import (
 )
 
 import (
-	"utils"
+	"github.com/data-o/aggregation-cache/utils"
 )
 
 type FileNode struct {

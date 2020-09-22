@@ -20,7 +20,7 @@ import (
 )
 
 import (
-	"utils"
+	"github.com/data-o/aggregation-cache/utils"
 )
 
 const (
@@ -135,7 +135,7 @@ func (t *DLT) GetFileLists() []*string {
 	return fileLists
 }
 
-func (t *DLT) Get(fileName string, thread int) (*ReadRet, ErrorCode, error) {
+func (t *DLT) Get(fileName string) (*ReadRet, ErrorCode, error) {
 	var (
 		ret  *ReadRet
 		err  error
