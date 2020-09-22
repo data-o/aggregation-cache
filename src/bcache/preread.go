@@ -168,7 +168,6 @@ func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string,
 	*/
 
 	realFileId := fileId // test
-
 	body := make([]byte, size)
 	n, err := io.ReadFull(httpResponse.Body, body)
 	if err != nil {

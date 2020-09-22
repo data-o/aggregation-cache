@@ -71,6 +71,7 @@ type Dataset struct {
 	valTotalSize   uint64
 
 	allowCacheSize uint64
+	allocSize      int64
 
 	groups         []Group  // |<- train -> | <- val -> |
 	leftGroupLevel []*Group // it is a list
@@ -92,7 +93,10 @@ type Dataset struct {
 }
 
 func (f *FileNode) Release() uint64 {
-	n := len(*f.Body)
+	var n uint64
+	if f.Body != nil {
+		n = uint64(len(*f.Body))
+	}
 	f.Body = nil
 	f.Cached = false
 	f.NotExist = false

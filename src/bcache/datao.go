@@ -193,7 +193,7 @@ func (t *DLT) Get(fileName string, thread int) (*ReadRet, ErrorCode, error) {
 		node, err := t.getFileFromCache(fileId, group)
 		if err != nil {
 			return nil, CODE_EMPTY, err
-		} else if node == nil {
+		} else if node == nil || !node.Cached {
 			return nil, CODE_EMPTY,
 				fmt.Errorf("don't have cache, but cachedFileNum is %d", group.cachedFileNum)
 		} else if node.NotExist {
@@ -248,7 +248,7 @@ func (t *DLT) Get(fileName string, thread int) (*ReadRet, ErrorCode, error) {
 		node, err := t.getFileFromCache(fileId, group)
 		if err != nil {
 			return nil, CODE_EMPTY, err
-		} else if node == nil {
+		} else if node == nil || !node.Cached {
 			return nil, CODE_EMPTY, fmt.Errorf("don't have cache, but get condition")
 		} else if node.NotExist {
 			code = CODE_NOT_FOUND
@@ -282,12 +282,6 @@ func (t *DLT) Get(fileName string, thread int) (*ReadRet, ErrorCode, error) {
 		}
 	}
 
-	if newFileNum%100000 == 0 {
-		fmt.Println("readCache", t.readFromCache, "readDirecty", t.readDirectly, "waitRead", t.waitRead)
-	}
-
-	//fmt.Println(typeread, fileId, ret.FileId)
-
 	return ret, code, err
 }
 
@@ -315,7 +309,6 @@ func (t *DLT) getFileFromCache(fileId uint32, group *DLTGroup) (*FileNode, error
 
 	//fmt.Println(tempId, "replace", fileId)
 	node := t.dataset.cachedFiles[tempId]
-
 	if node == nil || node.Cached == false {
 		return nil, fmt.Errorf("file %d is mark as cached , but not cached", tempId)
 	}
@@ -542,8 +535,8 @@ func (g *DLTGroup) releaseMem(force bool) {
 			if node == nil {
 				continue
 			}
-			g.group.cachedSize -= node.FileSize
-			g.dlt.dataset.cachedFiles[fileId] = nil
+
+			g.group.cachedSize -= node.Release()
 		}
 	}
 }
@@ -591,7 +584,9 @@ func (g *DLTGroup) readFromBackend(fileId uint32, isPreread bool) (*ReadRet, Err
 		g.lock.Lock()
 		node := dataset.cachedFiles[ret.FileId]
 		if node != nil {
-			g.group.cachedSize -= node.FileSize
+			if node.Cached {
+				g.group.cachedSize -= node.FileSize
+			}
 			node.Save(ret, (code == CODE_NOT_FOUND))
 		} else {
 			node = &FileNode{

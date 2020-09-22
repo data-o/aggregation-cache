@@ -14,9 +14,9 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"time"
-	//"net/http"
-	//_ "net/http/pprof"
 )
 
 import (
@@ -53,7 +53,6 @@ func readThread(dlt *bcache.DLT, fileLists []*string, startId, endId, threadId i
 			if node == nil {
 				panic("get empty node")
 			}
-			//fmt.Println("Success read", *fileLists[node.FileId], node.FileId, len(*node.Body), node.FileSize)
 		}
 		i++
 	}
@@ -161,14 +160,12 @@ func main() {
 		jobId uint32 = 1
 	)
 
-	/*
-		go func() {
-			http.ListenAndServe("0.0.0.0:8080", nil)
-		}()
-	*/
+	go func() {
+		http.ListenAndServe("0.0.0.0:8080", nil)
+	}()
 
 	datasetName := "imagenet1k"
-	maxCacheSize := (uint64(50) << 30)
+	maxCacheSize := (uint64(150) << 30)
 
 	dm := bcache.NewDatasetManager()
 	dlt, err := dm.Start(datasetName, jobId, maxCacheSize)
