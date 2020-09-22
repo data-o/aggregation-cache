@@ -24,7 +24,7 @@ const (
 
 	HEADER_LAST_MODIFIED = "Last-Modified"
 	S3_TIME_FORMAT       = "Mon, 02 Jan 2006 15:04:05 GMT"
-	HEADER_REAL_FILE_ID  =  "File-Id"
+	HEADER_REAL_FILE_ID  = "File-Id"
 )
 
 type ErrorCode int
@@ -34,19 +34,24 @@ const (
 	CODE_NOT_FOUND    = 404
 	CODE_EMPTY        = 10000
 	CODE_DLT_NOT_INIT = 10001
-	CODE_AGAIN = 10002
-
+	CODE_AGAIN        = 10002
 )
 
 const (
 	confNewEpochthread    = 100
-	confCacheVal          = false
-	confEndpointNum       = 2
+	confCacheVal          = true
+	confEndpointNum       = 3
 	confHttpClientNum     = 10
 	defaultRequestTimeOut = 1200 * time.Second
 	defaultHttpScheme     = "http"
 )
 
 var (
-	confEndpoints = [2]string{"10.130.48.86:8080", "10.130.48.86:8080"}
+	confEndpoints = [3]string{"192.168.0.2:8080", "192.168.0.3:8080", "192.168.0.4:8080"}
 )
+
+type ReadRet struct {
+	FileId   uint32
+	FileSize uint64
+	Body     *[]byte
+}

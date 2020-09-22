@@ -21,6 +21,10 @@ import (
 	"sync"
 )
 
+import (
+	"utils"
+)
+
 type DatasetManager struct {
 	datasets sync.Map // datasetName to Dataset
 }
@@ -46,7 +50,7 @@ func (m *DatasetManager) Start(datasetName string, jobId uint32, maxCacheSize ui
 		}
 	} else {
 		dataset = d.(*Dataset)
-    }
+	}
 
 	_, ok = dataset.dltMap.Load(jobId)
 	if ok {
@@ -77,7 +81,7 @@ func (m *DatasetManager) Start(datasetName string, jobId uint32, maxCacheSize ui
 }
 
 func (m *DatasetManager) Finish(datasetId, jobId uint32) error {
-    return nil
+	return nil
 }
 
 func (m *DatasetManager) getDatasetMap(datasetName string, maxCacheSize uint64) (*Dataset, error) {
@@ -185,11 +189,12 @@ func (m *DatasetManager) getDatasetMapfromFile(datasetMapPath string, dataset *D
 			return err
 		}
 
-		shardId, err := strconv.ParseUint(info[3], 10, 32)
-		if err != nil {
-			return err
-		}
-		shardId = shardId % DEFAULT_FILE_SHARD
+		shardId := utils.StringToInt(info[0], DEFAULT_FILE_SHARD)
+		//shardId, err := strconv.ParseUint(info[4], 10, 32)
+		//if err != nil {
+		//	return err
+		//}
+		//shardId = shardId % DEFAULT_FILE_SHARD
 
 		// groups are split to two part
 		// |  <-  train group -> | <- val group -> |
@@ -250,7 +255,7 @@ func (m *DatasetManager) getDatasetMapfromFile(datasetMapPath string, dataset *D
 		dataset.valFileNum += lastGroup.fileNum
 		dataset.valTotalSize += lastGroup.groupSize
 	}
-	
+
 	dataset.avgSize = dataset.totalSize / uint64(dataset.fileNum)
 
 	if err := scanner.Err(); err != nil {

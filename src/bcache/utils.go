@@ -30,5 +30,3 @@ func GetRandomString(size int64) []byte {
 	}
 	return retTemp
 }
-
-

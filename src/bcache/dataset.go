@@ -13,6 +13,7 @@
 package bcache
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 )
@@ -22,10 +23,11 @@ import (
 )
 
 type FileNode struct {
-	fileId   uint32
-	cached   bool
-	fileSize uint64
-	body     *[]byte
+	FileId   uint32
+	Cached   bool
+	NotExist bool
+	FileSize uint64
+	Body     *[]byte
 }
 
 type Group struct {
@@ -40,9 +42,9 @@ type Group struct {
 	allowCacheSize uint64
 	cachedSize     uint64
 
-	fileNum  uint32
-	next     *Group
-	pre      *Group
+	fileNum uint32
+	next    *Group
+	pre     *Group
 }
 
 type fileShard struct {
@@ -54,7 +56,7 @@ type Dataset struct {
 	id      uint32
 	kindNum int
 
-    avgSize uint64
+	avgSize uint64
 
 	groupNum      uint32
 	trainGroupNum uint32
@@ -90,16 +92,19 @@ type Dataset struct {
 }
 
 func (f *FileNode) Release() uint64 {
-    n := len(*f.body)
-    f.body = nil
-    f.cached = false
-    return uint64(n)
+	n := len(*f.Body)
+	f.Body = nil
+	f.Cached = false
+	f.NotExist = false
+	return uint64(n)
 }
 
-func (f *FileNode) Save(data *[]byte, size uint64) {
-    f.body = data
-    f.cached = true
-    f.fileSize = size
+func (f *FileNode) Save(ret *ReadRet, notExist bool) {
+	f.Body = ret.Body
+	f.FileId = ret.FileId
+	f.Cached = true
+	f.FileSize = ret.FileSize
+	f.NotExist = notExist
 }
 
 // now, sample implement
@@ -112,7 +117,12 @@ func (g *Group) getRandomUnreadedFile() (uint32, bool) {
 func (d *Dataset) GetFileId(fileName string) (uint32, bool) {
 	shardId := utils.StringToInt(fileName, DEFAULT_FILE_SHARD)
 	fileId, ok := d.shards[shardId].groups.Load(fileName)
-	return fileId.(uint32), ok
+	if ok {
+		return fileId.(uint32), ok
+	} else {
+		fmt.Println("failed get id of file", fileName)
+		return 0, false
+	}
 }
 
 // preprocess group
@@ -126,12 +136,14 @@ func (d *Dataset) groupInit() {
 
 	ratio := float64(d.allowCacheSize) / float64(totalFileSize)
 
+	allSize := uint64(0)
 	for i := uint32(0); i < groupEnd; i++ {
 		group := &d.groups[i]
-		group.allowCacheSize =  uint64( ratio * float64(group.groupSize))
-    }
+		group.allowCacheSize = uint64(ratio * float64(group.groupSize))
+		allSize += group.allowCacheSize
+	}
 
-    d.genGroupLevel()
+	d.genGroupLevel()
 }
 
 func (d *Dataset) genGroupLevel() {

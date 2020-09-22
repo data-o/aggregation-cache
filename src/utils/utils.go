@@ -162,7 +162,7 @@ func GetListsFromFile(listPath string) ([]string, error) {
 	return lists, nil
 }
 
-func ShuffleStringList(lists []string) []string {
+func ShuffleStringListAll(lists []*string) []*string {
 	listsLength := len(lists)
 	for i := listsLength - 1; i >= 0; i-- {
 		cId := rand.Intn(listsLength)
@@ -171,6 +171,23 @@ func ShuffleStringList(lists []string) []string {
 		lists[cId] = temp
 	}
 	return lists
+}
+
+func ShuffleStringList(lists []*string, start int, length int) ([]*string, error) {
+	listsLength := len(lists)
+	end := start + length
+	if end > listsLength {
+		return lists, fmt.Errorf("invalid end")
+	}
+
+	for i := start; i < end; i++ {
+		cId := rand.Intn(length)
+		temp := lists[i]
+		lists[i] = lists[start+cId]
+		lists[start+cId] = temp
+	}
+
+	return lists, nil
 }
 
 // Change UTC time string to timestamp

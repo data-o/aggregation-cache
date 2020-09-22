@@ -28,13 +28,15 @@ const (
 )
 
 type DLTGroup struct {
-	lock      sync.Mutex
+	lock sync.Mutex
 
 	condWaitCache *sync.Cond
 	condPreread   *sync.Cond
 
+	preReadWaitMem bool
+
 	cachedBitmap []byte
-	groupEpoch int32
+	groupEpoch   int32
 	remoteEpoch  int32
 
 	hasWiated int32
@@ -44,23 +46,27 @@ type DLTGroup struct {
 	readedFilesReal  *utils.BitMap // bitmap 1 or 0
 	readedFilesCache *utils.BitMap // bitmap 1 or 0
 
-	unreadFileNum     uint32
-	unreadFiles       []uint32
+	unreadFileNum uint32
+	unreadFiles   []uint32
 
 	readedCachedFileNum uint32 // don't contail unreaded files
 	readedCachedFiles   []uint32
 
 	prereadFileNum uint32
 
-	cachedFileNum     uint32   // don't contail unreaded files
-	cachedFiles       []uint32 // value is file id
+	cachedFileNum uint32   // don't contail unreaded files
+	cachedFiles   []uint32 // value is file id
 }
 
 type DLT struct {
-	id            uint32 // id of DLT
-	fileNum       uint32
+	id      uint32 // id of DLT
+	fileNum uint32
 
-	epoch        int32
+	readFromCache uint32
+	readDirectly  uint32
+	waitRead      uint32
+
+	epoch int32
 
 	dataset       *Dataset
 	readedFileNum uint32
@@ -96,7 +102,7 @@ func (t *DLT) init(dataset *Dataset) error {
 		g.dlt = t
 
 		g.group = &(dataset.groups[i])
-        // build bit map
+		// build bit map
 		g.readedFilesReal, err = utils.NewBitMap(g.group.fileNum)
 		if err != nil {
 			return err
@@ -108,9 +114,9 @@ func (t *DLT) init(dataset *Dataset) error {
 
 		// init unread file list
 		g.unreadFiles = make([]uint32, g.group.fileNum)
-		for j := g.group.startId; j <= g.group.endId; j ++ {
+		for j := g.group.startId; j <= g.group.endId; j++ {
 			g.unreadFiles[g.unreadFileNum] = j
-			g.unreadFileNum ++
+			g.unreadFileNum++
 			g.dlt.unreadFilesIndexs[j] = g.unreadFileNum
 		}
 
@@ -123,10 +129,17 @@ func (t *DLT) init(dataset *Dataset) error {
 	return nil
 }
 
-func (t *DLT) Get(fileName string) (*FileNode, ErrorCode, error) {
+func (t *DLT) GetFileLists() []*string {
+	fileLists := make([]*string, t.dataset.fileNum)
+	copy(fileLists, t.dataset.idToFilename)
+	return fileLists
+}
+
+func (t *DLT) Get(fileName string, thread int) (*ReadRet, ErrorCode, error) {
 	var (
-		node *FileNode
+		ret  *ReadRet
 		err  error
+		code ErrorCode = CODE_OK
 	)
 
 	if !t.inited {
@@ -143,6 +156,7 @@ func (t *DLT) Get(fileName string) (*FileNode, ErrorCode, error) {
 	groupId := t.dataset.fileIdToGroups[fileId]
 	group := &t.groups[groupId] // get DLT group
 
+	//fmt.Println("thread", thread, "start", fileId)
 	// add lock
 	lockReleased := false
 	group.lock.Lock()
@@ -154,74 +168,104 @@ func (t *DLT) Get(fileName string) (*FileNode, ErrorCode, error) {
 
 	// have been readed?
 	if group.readedFilesReal.Get(fileId - group.group.startId) {
-		return nil, CODE_EMPTY, fmt.Errorf("read angin %d", fileId)
+		if group.groupEpoch != atomic.LoadInt32(&t.epoch) {
+			group.newEpoch(t.epoch)
+		} else {
+			return nil, CODE_EMPTY, fmt.Errorf("it is read angin %d", fileId)
+		}
 	}
+	/*
+		fmt.Println("GroupId", group.group.id,
+			"file id", fileId,
+			"group filenum", group.group.fileNum,
+			"unreadFileNum", group.unreadFileNum,
+			"readedCachedFileNum", group.readedCachedFileNum,
+			"prereadFileNum", group.prereadFileNum,
+			"cachedFileNum", group.cachedFileNum,
+			"dlt.readedNum", t.readedFileNum,
+			"allowCacheSize", group.group.allowCacheSize,
+			"cacheSize", group.group.cachedSize,
+			"dlt.fileNum", t.fileNum)
+	*/
 
 	if group.cachedFileNum > 0 { // have cache, read from cache
 		// try to read from cache
-		node, err = t.getFileFromCache(fileId, group)
+		node, err := t.getFileFromCache(fileId, group)
 		if err != nil {
 			return nil, CODE_EMPTY, err
 		} else if node == nil {
 			return nil, CODE_EMPTY,
 				fmt.Errorf("don't have cache, but cachedFileNum is %d", group.cachedFileNum)
+		} else if node.NotExist {
+			code = CODE_NOT_FOUND
 		}
+
 		// mark file has been readed
-		group.readedFilesCache.Set(node.fileId - group.group.startId)
+		group.readedFilesCache.Set(node.FileId - group.group.startId)
 		// mark this file have been read (maybe replaceed by other file)
 		group.readedFilesReal.Set(fileId - group.group.startId)
 
-	} else if group.unreadFileNum > 0 {// have unreaded file, try to read it directly
+		ret = &ReadRet{
+			FileId:   node.FileId,
+			FileSize: node.FileSize,
+			Body:     node.Body,
+		}
+		atomic.AddUint32(&t.readFromCache, 1)
+	} else if group.unreadFileNum > 0 { // have unreaded file, try to read it directly
 		// don't have cache
 		tempId := fileId
-		if group.readedFilesCache.Get(fileId - group.group.startId) { // maybe replaced
+		if group.readedFilesCache.Get(fileId-group.group.startId) || // maybe replaced
+			group.dlt.unreadFilesIndexs[fileId] == 0 { // maybe process by preread
 			tempId, ok = group.getRandomUnreadedFile()
 			if !ok {
 				return nil, CODE_EMPTY,
 					fmt.Errorf("don't have unreaded file, but unreadFileNum is %d", group.unreadFileNum)
 			}
-		}
-
-		// remove from unread files
-		index := t.unreadFilesIndexs[tempId]
-		if index != 0 {
-			lastId := group.unreadFileNum - 1
-			if index != lastId {
-				group.unreadFiles[index] = group.unreadFiles[lastId]
-				t.unreadFilesIndexs[group.unreadFiles[lastId]] = index
-			}
-			// mark this file is readed
-			t.unreadFilesIndexs[tempId] = 0
-			group.unreadFileNum--
+		} else {
+			// remove from unread files
+			group.removeFromUnreadFile(tempId)
 		}
 
 		// try to read from endpoint
-		lockReleased = true
 		group.lock.Unlock()
-		node, err := group.readFromBackend(tempId, false)
+		ret, code, err = group.readFromBackend(tempId, false)
+		group.lock.Lock()
 		// maybe , we can cache all files
-		if err != nil {
-			return nil, CODE_EMPTY, err
+		if code == CODE_OK || code == CODE_NOT_FOUND {
+			// mark this file have been read (maybe replaceed by other file)
+			group.readedFilesReal.Set(fileId - group.group.startId)
+			group.readedFilesCache.Set(ret.FileId - group.group.startId)
+		} else {
+			return nil, code, err
 		}
-
-		// mark this file have been read (maybe replaceed by other file)
-		group.readedFilesReal.Set(fileId - group.group.startId)
-		group.readedFilesCache.Set(node.fileId - group.group.startId)
+		atomic.AddUint32(&t.readDirectly, 1)
+		//typeread = 2
 	} else if group.prereadFileNum > 0 { // waiting for preread
 		atomic.AddInt32(&group.hasWiated, 1)
 		group.condWaitCache.Wait()
 		atomic.AddInt32(&group.hasWiated, -1)
 		// try to read from cache
-		node, err = t.getFileFromCache(fileId, group)
+		node, err := t.getFileFromCache(fileId, group)
 		if err != nil {
 			return nil, CODE_EMPTY, err
 		} else if node == nil {
 			return nil, CODE_EMPTY, fmt.Errorf("don't have cache, but get condition")
+		} else if node.NotExist {
+			code = CODE_NOT_FOUND
 		}
 		// mark file has been readed
-		group.readedFilesCache.Set(node.fileId - group.group.startId)
+		group.readedFilesCache.Set(node.FileId - group.group.startId)
 		// mark this file have been read (maybe replaceed by other file)
 		group.readedFilesReal.Set(fileId - group.group.startId)
+
+		ret = &ReadRet{
+			FileId:   node.FileId,
+			FileSize: node.FileSize,
+			Body:     node.Body,
+		}
+		atomic.AddUint32(&t.waitRead, 1)
+
+		//typeread = 3
 	} else {
 		if group.groupEpoch != atomic.LoadInt32(&t.epoch) {
 			group.newEpoch(t.epoch)
@@ -230,14 +274,21 @@ func (t *DLT) Get(fileName string) (*FileNode, ErrorCode, error) {
 		return nil, CODE_EMPTY, fmt.Errorf("don't have unread file, when try to read %d", fileId)
 	}
 
-	atomic.AddUint32(&t.readedFileNum, 1)
-	if atomic.LoadUint32(&t.readedFileNum) == t.fileNum {
+	newFileNum := atomic.AddUint32(&t.readedFileNum, 1)
+	if newFileNum == t.fileNum {
 		if ok := atomic.CompareAndSwapUint32(&t.readedFileNum, t.fileNum, 0); ok {
+			fmt.Println("Finish epoch", t.epoch)
 			atomic.AddInt32(&t.epoch, 1)
 		}
 	}
 
-	return node, CODE_OK, err
+	if newFileNum%100000 == 0 {
+		fmt.Println("readCache", t.readFromCache, "readDirecty", t.readDirectly, "waitRead", t.waitRead)
+	}
+
+	//fmt.Println(typeread, fileId, ret.FileId)
+
+	return ret, code, err
 }
 
 // for batfs
@@ -262,13 +313,14 @@ func (t *DLT) getFileFromCache(fileId uint32, group *DLTGroup) (*FileNode, error
 		group.markCachedFileReaded(fileId, val-1)
 	}
 
+	//fmt.Println(tempId, "replace", fileId)
 	node := t.dataset.cachedFiles[tempId]
 
-	if node == nil || node.cached == false {
+	if node == nil || node.Cached == false {
 		return nil, fmt.Errorf("file %d is mark as cached , but not cached", tempId)
 	}
 
-	if group.group.allowCacheSize <= group.group.cachedSize {
+	if group.preReadWaitMem {
 		group.condPreread.Signal()
 	}
 
@@ -320,10 +372,26 @@ func (g *DLTGroup) getRandomUnreadedFile() (uint32, bool) {
 
 	// mark this file is readed
 	g.dlt.unreadFilesIndexs[fileId] = 0
+	//fmt.Println("g-", fileId)
 
 	g.unreadFileNum--
 
 	return fileId, true
+}
+
+// remove this file from unreaded files
+func (g *DLTGroup) removeFromUnreadFile(fileId uint32) {
+	orgIndex := g.dlt.unreadFilesIndexs[fileId]
+	if orgIndex != 0 { // in unread file list
+		lastId := g.unreadFileNum - 1
+		if orgIndex != g.unreadFileNum {
+			g.unreadFiles[orgIndex-1] = g.unreadFiles[lastId]
+			g.dlt.unreadFilesIndexs[g.unreadFiles[lastId]] = orgIndex
+		}
+		g.unreadFileNum--
+		g.dlt.unreadFilesIndexs[fileId] = 0
+		//fmt.Println("r-", fileId)
+	}
 }
 
 // add file to unread files
@@ -347,6 +415,8 @@ func (g *DLTGroup) addUnreadedFile(fileId uint32) {
 	g.unreadFileNum++
 	g.dlt.unreadFilesIndexs[fileId] = g.unreadFileNum
 
+	//fmt.Println("+", fileId)
+
 	if g.unreadFileNum == 1 {
 		g.condPreread.Signal()
 	}
@@ -354,38 +424,26 @@ func (g *DLTGroup) addUnreadedFile(fileId uint32) {
 
 // must be protect by lock
 func (g *DLTGroup) addFileToCache(node *FileNode) {
-	fileId := node.fileId
+	fileId := node.FileId
 	// if this file has been readed
 	// add to readed cache
 	if g.readedFilesCache.Get(fileId - g.group.startId) {
 		if g.group.allowCacheSize >= g.group.cachedSize {
 			g.readedCachedFiles[g.readedCachedFileNum] = fileId // may core
 			g.readedCachedFileNum++
-			g.group.cachedSize += node.fileSize
+			g.group.cachedSize += node.FileSize
 		}
 		return
 	}
 
 	// remove this file from unreaded files
-	orgIndex := g.dlt.unreadFilesIndexs[fileId]
-	if orgIndex != 0 { // in unread file list
-		fmt.Println("Warning: not remove from unread files", fileId)
-		if orgIndex != g.unreadFileNum {
-			g.unreadFiles[orgIndex-1] = g.unreadFiles[g.unreadFileNum-1]
-		}
-		g.unreadFileNum--
-		g.dlt.unreadFilesIndexs[fileId] = 0
-	}
-	
+	g.removeFromUnreadFile(fileId)
+
 	if g.dlt.cacheedFilesCache[fileId] == 0 { // not cached
 		g.cachedFiles[g.cachedFileNum] = fileId
 		g.cachedFileNum++
 		g.dlt.cacheedFilesCache[fileId] = g.cachedFileNum
-		g.group.cachedSize += node.fileSize
-		fmt.Println("group", g.group.id, "fileNum", g.group.fileNum, "cached", g.cachedFileNum, 
-		"unreaded", g.unreadFileNum, "preread", g.prereadFileNum, "allowCacheSize", g.group.allowCacheSize,
-		"cachedSize", g.group.cachedSize)
-
+		g.group.cachedSize += node.FileSize
 		if atomic.LoadInt32(&g.hasWiated) > 0 {
 			g.condWaitCache.Signal()
 		}
@@ -398,11 +456,9 @@ func (g *DLTGroup) newEpoch(epoch int32) {
 	if g.groupEpoch == epoch {
 		return
 	}
-    g.lock.Lock()
-    defer g.lock.Unlock()
 
 	// init condition variable
-    // build bit map
+	// build bit map
 	g.readedFilesReal.Clear()
 	g.readedFilesCache.Clear()
 	g.unreadFileNum = 0
@@ -410,7 +466,7 @@ func (g *DLTGroup) newEpoch(epoch int32) {
 	g.prereadFileNum = 0
 	g.readedCachedFileNum = 0
 
-    dataset := g.dlt.dataset
+	dataset := g.dlt.dataset
 	g.groupEpoch = epoch
 
 	// clear bitmap
@@ -422,33 +478,35 @@ func (g *DLTGroup) newEpoch(epoch int32) {
 	if len(g.cachedBitmap) == 0 {
 		g.cachedBitmap = make([]byte, mapLength)
 	} else {
-		for i := uint32(0); i < mapLength; i ++ {
+		for i := uint32(0); i < mapLength; i++ {
 			g.cachedBitmap[i] = 0
 		}
 	}
 
-    for i := g.group.startId; i <= g.group.endId; i++ {
-        if dataset.cachedFiles[i] != nil && dataset.cachedFiles[i].cached {
+	for i := g.group.startId; i <= g.group.endId; i++ {
+		if dataset.cachedFiles[i] != nil && dataset.cachedFiles[i].Cached {
 			// set cache
 			g.cachedFiles[g.cachedFileNum] = i
-			g.cachedFileNum ++
+			g.cachedFileNum++
 			g.dlt.cacheedFilesCache[i] = g.cachedFileNum
 			// clear unread file
 			g.dlt.unreadFilesIndexs[i] = 0
-			g.cachedBitmap[(i - g.group.startId) / 8] |= uint8(1) << ((i - g.group.startId) % 8)
-        } else {
+			g.cachedBitmap[(i-g.group.startId)/8] |= uint8(1) << ((i - g.group.startId) % 8)
+		} else {
 			// clear cache
 			g.dlt.cacheedFilesCache[i] = 0
 			// update unread files
 			g.unreadFiles[g.unreadFileNum] = i
-			g.unreadFileNum ++
+			g.unreadFileNum++
 			g.dlt.unreadFilesIndexs[i] = g.unreadFileNum
 		}
-    }
+	}
+
+	g.condPreread.Signal()
 }
 
 // should protect by lock
-func (g *DLTGroup) releaseMem() {
+func (g *DLTGroup) releaseMem(force bool) {
 	if g.readedCachedFileNum == 0 { // don't have cache
 		return
 	}
@@ -457,36 +515,45 @@ func (g *DLTGroup) releaseMem() {
 		i uint32
 	)
 
-	releaseNum := g.readedCachedFileNum
-	if releaseNum > g.unreadFileNum {
-		releaseNum = g.unreadFileNum
-	}
+	if force ||
+		g.group.cachedSize+uint64(g.unreadFileNum)*g.dlt.dataset.avgSize > g.group.allowCacheSize {
 
-	for ; i < releaseNum; i ++ {
-		if g.readedCachedFileNum > 0 {
-			g.readedCachedFileNum -- 
-		} else {
-			break
+		releaseNum := g.readedCachedFileNum
+		if releaseNum > g.unreadFileNum {
+			releaseNum = g.unreadFileNum
 		}
 
-		fileId := g.readedCachedFiles[g.readedCachedFileNum]
-		node := g.dlt.dataset.cachedFiles[fileId]
-		if node == nil || node.cached == false {
-			continue
+		// at least release 10
+		if !force && releaseNum < 10 {
+			return
 		}
-		n := node.Release()
-		g.group.cachedSize -= n
+
+		//fmt.Println("GroupId", g.group.id, "release", releaseNum, force)
+
+		for ; i < releaseNum; i++ {
+			if g.readedCachedFileNum > 0 {
+				g.readedCachedFileNum--
+			} else {
+				break
+			}
+
+			fileId := g.readedCachedFiles[g.readedCachedFileNum]
+			node := g.dlt.dataset.cachedFiles[fileId]
+			if node == nil {
+				continue
+			}
+			g.group.cachedSize -= node.FileSize
+			g.dlt.dataset.cachedFiles[fileId] = nil
+		}
 	}
 }
 
 // should not be lock
-func (g *DLTGroup) readFromBackend(fileId uint32, isPreread bool) (*FileNode, error) {
+func (g *DLTGroup) readFromBackend(fileId uint32, isPreread bool) (*ReadRet, ErrorCode, error) {
 	var (
-		data []byte
+		data          []byte
 		sendCacheInfo bool
 	)
-
-	fmt.Println("input fileid", fileId)
 
 	dataset := g.dlt.dataset
 	oldEpoch := g.remoteEpoch
@@ -497,59 +564,58 @@ func (g *DLTGroup) readFromBackend(fileId uint32, isPreread bool) (*FileNode, er
 	}
 
 	// build request
-	httpClient := g.dlt.dataset.clients[g.group.id % confHttpClientNum]
-	endpoint := confEndpoints[g.group.id % confEndpointNum]
+	httpClient := g.dlt.dataset.clients[g.group.id%confHttpClientNum]
+	endpoint := confEndpoints[g.group.id%confEndpointNum]
 
 	// start get file from backend
-	body, size, realId, err := readFromBackend(g.dlt.dataset, httpClient, endpoint, dataset.id, fileId, g.group.id,
+	ret, code, err := readFromBackend(g.dlt.dataset, httpClient, endpoint, dataset.id, fileId, g.group.id,
 		g.dlt.id, data)
 
-	if err != nil {
-		fmt.Println("failed to get file", fileId, "from backend", err)
+	if code != CODE_NOT_FOUND && code != CODE_OK {
 		g.lock.Lock()
 		g.addUnreadedFile(fileId)
 		g.lock.Unlock()
-		fmt.Println("unreadFileNum", g.group.fileNum,  g.unreadFileNum, g.prereadFileNum)
-		return nil, err
+		return nil, code, err
 	}
 
-	if sendCacheInfo {
+	if sendCacheInfo && code == CODE_OK {
 		if ok := atomic.CompareAndSwapInt32(&g.remoteEpoch, oldEpoch, g.groupEpoch); ok {
 			g.remoteEpoch = g.groupEpoch
 		}
 	}
 
 	// add to cache
-	if isPreread ||  (g.group.allowCacheSize - g.group.cachedSize)/dataset.avgSize >
-		uint64(g.unreadFileNum + g.prereadFileNum) {
+	if isPreread || (g.group.allowCacheSize-g.group.cachedSize)/dataset.avgSize >
+		uint64(g.unreadFileNum+g.prereadFileNum) {
 
 		g.lock.Lock()
-		node := dataset.cachedFiles[realId]
+		node := dataset.cachedFiles[ret.FileId]
 		if node != nil {
-			node.Save(body, size)
+			g.group.cachedSize -= node.FileSize
+			node.Save(ret, (code == CODE_NOT_FOUND))
 		} else {
-			 node =  &FileNode{
-				fileId:   realId,
-				cached:   true,
-				fileSize: size,
-				body:     body,
+			node = &FileNode{
+				FileId:   ret.FileId,
+				Cached:   true,
+				NotExist: (code == CODE_NOT_FOUND),
+				FileSize: ret.FileSize,
+				Body:     ret.Body,
 			}
-			dataset.cachedFiles[realId] = node
 		}
+		dataset.cachedFiles[ret.FileId] = node
 
 		// add to cache files
 		g.addFileToCache(node)
-		if realId != fileId {
+		if ret.FileId != fileId {
 			g.addUnreadedFile(fileId)
 		}
 		g.lock.Unlock()
-
-		return node, nil
+	} else if ret.FileId != fileId {
+		g.lock.Lock()
+		g.removeFromUnreadFile(ret.FileId)
+		g.addUnreadedFile(fileId)
+		g.lock.Unlock()
 	}
 
-	return &FileNode {
-		fileId: realId,
-		fileSize: size,
-		body:    body,
-	}, nil
+	return ret, code, err
 }
