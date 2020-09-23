@@ -139,14 +139,14 @@ func GetProperConnNum(connNum int, threadNum int) int {
 }
 
 // get file lists info from file
-func GetListsFromFile(listPath string) ([]string, error) {
+func GetListsFromFile(listPath string) ([]*string, error) {
 	fd, err := os.Open(listPath)
 	if err != nil {
 		return nil, err
 	}
 	defer fd.Close()
 
-	lists := []string{}
+	lists := []*string{}
 
 	scanner := bufio.NewScanner(fd)
 	for scanner.Scan() {
@@ -154,7 +154,7 @@ func GetListsFromFile(listPath string) ([]string, error) {
 		if objectName == "" {
 			continue
 		}
-		lists = append(lists, objectName)
+		lists = append(lists, &objectName)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err

@@ -73,6 +73,7 @@ type DLT struct {
 	groups        []DLTGroup
 	inited        bool
 
+	replaceFilesIndex []uint32
 	unreadFilesIndexs []uint32 // don't contain cached files
 	cacheedFilesCache []uint32 // index to cachedFiles
 }
@@ -92,6 +93,7 @@ func (t *DLT) init(dataset *Dataset) error {
 
 	t.unreadFilesIndexs = make([]uint32, dataset.fileNum)
 	t.cacheedFilesCache = make([]uint32, dataset.fileNum)
+	t.replaceFilesIndex = make([]uint32, dataset.fileNum)
 
 	for i := uint32(0); i < dataset.groupNum; i++ {
 		g := &(t.groups[i])
@@ -135,6 +137,10 @@ func (t *DLT) GetFileLists() []*string {
 	return fileLists
 }
 
+func (t *DLT) GetFileId(fileName string) (uint32, bool) {
+	return t.dataset.GetFileId(fileName)
+}
+
 func (t *DLT) Get(fileName string) (*ReadRet, ErrorCode, error) {
 	var (
 		ret  *ReadRet
@@ -168,8 +174,30 @@ func (t *DLT) Get(fileName string) (*ReadRet, ErrorCode, error) {
 
 	// have been readed?
 	if group.readedFilesReal.Get(fileId - group.group.startId) {
-		if group.groupEpoch != atomic.LoadInt32(&t.epoch) {
+		if group.unreadFileNum == 0 && // it is new epoch
+			group.cachedFileNum == 0 &&
+			group.groupEpoch != atomic.LoadInt32(&t.epoch) {
 			group.newEpoch(t.epoch)
+		} else if t.replaceFilesIndex[fileId] != 0 { // have read this object
+			// read without replace
+			realId := t.replaceFilesIndex[fileId] - 1
+			tnode := t.dataset.cachedFiles[realId]
+			if tnode != nil && tnode.Cached {
+				fmt.Println("Repeat read from cache ", fileName)
+				return &ReadRet{
+					FileId:   tnode.FileId,
+					FileSize: tnode.FileSize,
+					Body:     tnode.Body,
+				}, CODE_OK, nil
+			} else {
+				fmt.Println("Repeat read from backend ", fileName)
+				// start get file from backend
+				// build request
+				httpClient := t.dataset.clients[group.group.id%confHttpClientNum]
+				endpoint := confEndpoints[group.group.id%confEndpointNum]
+				return readFromBackend(t.dataset, httpClient, endpoint,
+					t.dataset.id, realId, group.group.id, t.id, nil, false)
+			}
 		} else {
 			return nil, CODE_EMPTY, fmt.Errorf("it is read angin %d", fileId)
 		}
@@ -290,6 +318,11 @@ func (t *DLT) Get(fileName string) (*ReadRet, ErrorCode, error) {
 		}
 	}
 
+	if newFileNum%100000 == 0 {
+		fmt.Println("ReadType", t.readFromCache, t.readDirectly, t.waitRead)
+	}
+
+	t.replaceFilesIndex[fileId] = ret.FileId + 1
 	return ret, code, err
 }
 
@@ -502,6 +535,7 @@ func (g *DLTGroup) newEpoch(epoch int32) {
 			g.unreadFileNum++
 			g.dlt.unreadFilesIndexs[i] = g.unreadFileNum
 		}
+		g.dlt.replaceFilesIndex[i] = 0
 	}
 
 	g.condPreread.Signal()
@@ -571,7 +605,7 @@ func (g *DLTGroup) readFromBackend(fileId uint32, isPreread bool) (*ReadRet, Err
 
 	// start get file from backend
 	ret, code, err := readFromBackend(g.dlt.dataset, httpClient, endpoint, dataset.id, fileId, g.group.id,
-		g.dlt.id, data)
+		g.dlt.id, data, true)
 
 	if code != CODE_NOT_FOUND && code != CODE_OK {
 		g.lock.Lock()

@@ -99,16 +99,23 @@ func (d *Dataset) PrereadStart() {
 }
 
 func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string, datasetId, fileId, groupId,
-	dltId uint32, data []byte) (*ReadRet, ErrorCode, error) {
+	dltId uint32, data []byte, replace bool) (*ReadRet, ErrorCode, error) {
+
+	var (
+		query string
+	)
 
 	/** for test */
 	fileName := *(dataset.idToFilename[fileId])
 	datasetName := "imagenet"
 	prefix := "/" + datasetName + "/" + fileName
 	/* test end */
+	if !replace {
+		query = "?replace=false"
+	}
 
 	//prefix := fmt.Sprintf("/%d/%d/%d/%d", datasetId, fileId, groupId, dltId)
-	httpRequest := utils.NewHttpRequest(defaultHttpScheme, endpoint, prefix, "")
+	httpRequest := utils.NewHttpRequest(defaultHttpScheme, endpoint, prefix, query)
 	httpClient.Timeout = defaultRequestTimeOut
 
 	// need send cache info to backend
