@@ -6,6 +6,8 @@ import (
 	"hash/crc32"
 	"math/rand"
 	"os"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,21 @@ const (
 var (
 	OsPathSeparator = fmt.Sprintf("%c", os.PathSeparator)
 )
+
+// Generate a random bytes
+func GetRandomString(size int64) []byte {
+	var (
+		basicString = []byte("123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+		i           int64
+	)
+	retTemp := make([]byte, size)
+	basicLen := len(basicString)
+	// TODO optimize performance
+	for i = 0; i < size; i++ {
+		retTemp[i] = basicString[rand.Intn(basicLen)]
+	}
+	return retTemp
+}
 
 type BitMap struct {
 	maps     []uint64
@@ -77,6 +94,19 @@ func DoesFileExist(filePath string) bool {
 		return true
 	}
 	return false
+}
+
+// Wrapper of function filepath.Abs()
+// Abs can recognize '~'
+func Abs(localPath string) (string, error) {
+	if strings.HasPrefix(localPath, "~") {
+		userHomeDir, err := GetHomeDirOfUser()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(userHomeDir, localPath[1:]), nil
+	}
+	return filepath.Abs(localPath)
 }
 
 // Check whether path exist
@@ -200,11 +230,41 @@ func TranUTCTimeStringToTimeStamp(utcTimeString, oldTimeForm string) (int64, err
 	return timestamp, nil
 }
 
-func StringToInt(str string, mode int) int {
+func StringToIntV1(str string, mode int) int {
 	val := int(crc32.ChecksumIEEE([]byte(str)))
 	if val >= 0 {
 		return val % mode
 	} else {
 		return (-val) % mode
 	}
+}
+
+func StringToIntV2(str string, mode int) int {
+	var (
+		sum int64
+	)
+
+	strLen := len(str)
+	gap := strLen / 5
+	if gap == 0 {
+		gap = 1
+	}
+
+	for i := 0; i < strLen; i += gap {
+		sum = sum * int64(str[i])
+	}
+
+	sum = sum % int64(mode)
+	return int(sum)
+
+}
+
+// Geting home directory of current user
+func GetHomeDirOfUser() (string, error) {
+	// TODO maybe can't cross platform
+	user, err := user.Current()
+	if err == nil {
+		return user.HomeDir, nil
+	}
+	return "", err
 }

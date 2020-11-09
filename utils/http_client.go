@@ -13,20 +13,37 @@
 package utils
 
 import (
+	"bytes"
+	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	defaultMaxIdleConnsPerHost   = 1000
-	defaultMaxIdleConns          = 1000
+	DEFAULT_RETRY_NUM = 3
+
+	defaultMaxIdleConnsPerHost   = 300
+	defaultMaxIdleConns          = 300
 	defaultIdleConnTimeout       = 0
 	defaultResponseHeaderTimeout = 60 * time.Second
 	defaultDialTimeout           = 30 * time.Second
 )
+
+var httpRequestPool = sync.Pool{
+	New: func() interface{} {
+		return &http.Request{
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			URL:        &url.URL{},
+		}
+	},
+}
 
 func SplitHttpPrefix(endpoint string) (string, string) {
 	if strings.HasPrefix(endpoint, "https://") {
@@ -58,17 +75,50 @@ func NewHttpClient() *http.Client {
 }
 
 func NewHttpRequest(httpScheme, endpoint, path, query string) *http.Request {
-	httpRequest := &http.Request{
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
+	request := httpRequestPool.Get().(*http.Request)
+	request.URL.Scheme = httpScheme
+	request.URL.Host = endpoint
+	request.URL.Path = path
+	request.URL.RawQuery = query
+	return request
+}
+
+func CloseHttpRequest(request *http.Request) {
+	httpRequestPool.Put(request)
+}
+
+func SendToBackend(httpClient *http.Client, scheme, endpoint, prefix, query string,
+	data []byte) (int, error) {
+
+	length := len(data)
+	httpRequest := NewHttpRequest(scheme, endpoint, prefix, query)
+	httpClient.Timeout = defaultResponseHeaderTimeout
+	httpRequest.ContentLength = int64(length)
+	httpRequest.Method = http.MethodPut
+
+	for retry := 0; retry < DEFAULT_RETRY_NUM; retry++ {
+		httpRequest.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+
+		// send request
+		httpResponse, err := httpClient.Do(httpRequest)
+		if err != nil {
+			return 0, err
+		} else if httpResponse == nil {
+			return 0, fmt.Errorf("http response is empty!")
+		}
+
+		defer httpResponse.Body.Close()
+		message, _ := ioutil.ReadAll(httpResponse.Body)
+		// read data
+		if httpResponse.StatusCode != 200 {
+			err = fmt.Errorf("Http code %d, message %s!", httpResponse.StatusCode, message)
+			if httpResponse.StatusCode >= 500 {
+				continue
+			}
+			return httpResponse.StatusCode, err
+		}
+		return httpResponse.StatusCode, nil
 	}
-	internalUrl := &url.URL{
-		Scheme:   httpScheme,
-		Host:     endpoint,
-		Path:     path,
-		RawQuery: query,
-	}
-	httpRequest.URL = internalUrl
-	return httpRequest
+
+	return 200, nil
 }
