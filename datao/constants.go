@@ -23,6 +23,8 @@ const (
 	HEADER_LAST_MODIFIED = "Last-Modified"
 	S3_TIME_FORMAT       = "Mon, 02 Jan 2006 15:04:05 GMT"
 	HEADER_REAL_FILE_ID  = "File-Id"
+
+	PRIORITY_GAP_BASE = 1000000000
 )
 
 type ErrorCode int

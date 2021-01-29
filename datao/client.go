@@ -19,6 +19,7 @@ import (
 
 import (
 	"github.com/data-o/aggregation-cache/dconfig"
+	"github.com/data-o/aggregation-cache/utils"
 )
 
 type ClientCacheGroup struct {
@@ -43,7 +44,7 @@ func (c *ClientCacheGroup) processReadAgain(fileName string, fileId uint32, g *D
 	// try read from backend
 	LogFromtln("client Repeat read from backend ", fileName)
 	// read without replace
-	ret, code, err := g.readFromBackend(realId, false)
+	ret, code, err := g.readFromBackend(realId, false, false)
 	defer readRetPool.Put(ret)
 	// don't add to cache
 	if code != CODE_OK {
@@ -95,9 +96,16 @@ func (c *ClientCacheGroup) NewEpoch(g *DLTGroup, epoch int32, cachedBitmap []byt
 		node := group.dataset.cachedFiles[i]
 		if node != nil && node.Cached {
 			// set cache
-			g.cachedFiles[g.cachedFileNum] = i
-			g.cachedFileNum++
-			g.dlt.cachedFilesCache[i] = g.cachedFileNum
+			if node.AollocType == utils.ALLOC_TYPE_NEW ||
+				node.AollocType == utils.ALLOC_TYPE_EXTR {
+				g.highPriorityCaches[g.highPriorityNum] = i
+				g.highPriorityNum++
+				g.dlt.cachedFilesCache[i] = g.highPriorityNum + PRIORITY_GAP_BASE
+			} else {
+				g.cachedFiles[g.cachedFileNum] = i
+				g.cachedFileNum++
+				g.dlt.cachedFilesCache[i] = g.cachedFileNum
+			}
 			// clear unread file
 			g.dlt.unreadFilesIndexs[i] = 0
 			g.cachedBitmap[(i-group.startId)/8] |= uint8(1) << ((i - group.startId) % 8)
@@ -110,10 +118,6 @@ func (c *ClientCacheGroup) NewEpoch(g *DLTGroup, epoch int32, cachedBitmap []byt
 			g.dlt.unreadFilesIndexs[i] = g.unreadFileNum
 		}
 		g.dlt.replaceFilesIndex[i] = 0
-	}
-
-	if g.unreadFileNum == 0 {
-		LogFromtln("group", group.id, "finish all cached cached num", g.cachedFileNum)
 	}
 
 	if dconfig.ConfWithCacheServer {

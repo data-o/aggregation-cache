@@ -37,7 +37,7 @@ func (g *Group) preReadProcess() {
 	)
 
 	bm := g.bm
-	avgFileNeedBlock := utils.NeedBlock(g.dataset.avgSize) / 2
+	avgFileNeedBlock := utils.NeedBlock(g.dataset.avgSize)
 	if avgFileNeedBlock == 0 {
 		avgFileNeedBlock = 1
 	}
@@ -99,18 +99,14 @@ func (g *Group) preReadProcess() {
 				mg.addUnreadedFile(fileId, 2)
 			} else {
 				if ret.Code == CODE_OK {
-					body, err := utils.NewRefReadCloserBase(g.id, g.bm, g.extrBm,
-						ret.FileSize, ret.Body)
 					mg.lock.Lock()
-					if err != nil { //TODO need tell backend
-						LogFromtln("failed create new reader", err)
-						mg.addUnreadedFile(fileId, 5)
-					} else {
-						g.addFileToCache(mg, ret.FileId, ret.FileSize, ret.Md5val, body, false, true)
-					}
+					body := ret.Body.(*utils.RefReadCloserBase)
+					g.addFileToCache(mg, ret.FileId, ret.FileSize, ret.Md5val, body,
+						ret.Type, false, true)
 				} else {
 					mg.lock.Lock()
-					g.addFileToCache(mg, ret.FileId, ret.FileSize, ret.Md5val, nil, true, true)
+					g.addFileToCache(mg, ret.FileId, ret.FileSize, ret.Md5val, nil,
+						utils.ALLOC_TYPE_NONE, true, true)
 				}
 				readRetPool.Put(ret)
 			}
@@ -170,22 +166,21 @@ func getRealFileId(rsp *http.Response) (uint32, bool, error) {
 	return uint32(realFileId), true, nil
 }
 
-func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string, datasetId, fileId,
-	groupId, dltId uint32, replace bool) (*ReadRet, ErrorCode, error) {
+func readFromBackend(dataset *Dataset, g *Group, httpClient *http.Client, endpoint string,
+	fileId, dltId uint32, replace, needCache bool) (*ReadRet, ErrorCode, error) {
 
 	var (
 		query        string
 		prefix       string
-		httpResponse *http.Response
 		ok           bool
-		err          error
+		retErr       error
 	)
 
 	fileName := *(dataset.idToFilename[fileId])
 
 	if dconfig.ConfWithCacheServer {
 		prefix = "/get/" + fileName
-		query = fmt.Sprintf("group=%d&replace=%v&jobid=%d", groupId, replace, dltId)
+		query = fmt.Sprintf("group=%d&replace=%v&jobid=%d", g.id, replace, dltId)
 	} else {
 		prefix = "/" + dataset.bucketName + "/" + fileName
 	}
@@ -198,16 +193,7 @@ func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string,
 	realFileId := fileId
 
 	for retry := 0; retry < DEFAULT_RETRY_NUM; retry++ {
-		// send request
-		/*
-			dec := ioutil.NopCloser(bytes.NewReader(content))
-			ret := readRetPool.Get().(*ReadRet)
-			ret.Init(realFileId, 262144, dec, CODE_OK)
-
-			return ret, CODE_OK, nil
-		*/
-
-		httpResponse, err = httpClient.Do(httpRequest)
+		httpResponse, err := httpClient.Do(httpRequest)
 		if err != nil {
 			return nil, CODE_EMPTY, err
 		} else if httpResponse == nil {
@@ -219,7 +205,8 @@ func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string,
 			if err != nil {
 				return nil, CODE_EMPTY, err
 			} else if !ok && (httpResponse.StatusCode == 200 || httpResponse.StatusCode == 404) {
-				return nil, CODE_EMPTY, fmt.Errorf("failed get real file id for %s %s", prefix, httpResponse.Header.Get(HEADER_REAL_FILE_ID))
+				return nil, CODE_EMPTY, fmt.Errorf("failed get real file id for %s %s", prefix,
+					httpResponse.Header.Get(HEADER_REAL_FILE_ID))
 			}
 		}
 
@@ -232,32 +219,49 @@ func readFromBackend(dataset *Dataset, httpClient *http.Client, endpoint string,
 				io.WriteString(h, mbody)
 				md5Val := hex.EncodeToString(h.Sum(nil))
 				if md5Val !=  etag {
-					err = fmt.Errorf("get warning content md5 of %s etag is %s is %s size is %d", fileName, md5Val, etag, size)
+					err = fmt.Errorf("get warning content md5 of %s etag is %s is %s size is %d",
+						fileName, md5Val, etag, size)
 					fmt.Println(err)
 					continue
 				}
 			*/
+
 			ret := readRetPool.Get().(*ReadRet)
-			ret.Init(uint32(realFileId), size, httpResponse.Body, CODE_OK)
+			if needCache {
+				body, aType, err := utils.NewRefReadCloserBase(uint32(realFileId), g.bm, g.extrBm,
+					size, httpResponse.Body)
+				if err != nil {
+					LogFromtln("failed create new reader", err)
+					panic("failed careate new reader")
+				}
+
+				ret.Init(uint32(realFileId), size, body, CODE_OK)
+				ret.Type = aType
+				httpResponse.Body.Close()
+			} else {
+				ret.Init(uint32(realFileId), size, httpResponse.Body, CODE_OK)
+			}
+
 			ret.Md5val = httpResponse.Header.Get("ETag")
 			if len(ret.Md5val) > 0 && !dconfig.ConfWithCacheServer {
 				ret.Md5val = ret.Md5val[1 : len(ret.Md5val)-1]
 			}
-			return ret, CODE_OK, nil
-		}
 
-		message, _ := ioutil.ReadAll(httpResponse.Body)
-		httpResponse.Body.Close()
-		err = fmt.Errorf("Http code %d, message %s!", httpResponse.StatusCode, message)
-		if httpResponse.StatusCode == 404 {
-			ret := readRetPool.Get().(*ReadRet)
-			ret.Init(realFileId, 0, nil, CODE_NOT_FOUND)
-			return ret, CODE_NOT_FOUND, err
-		} else if httpResponse.StatusCode >= 500 {
-			continue
+			return ret, CODE_OK, nil
+		} else {
+			message, _ := ioutil.ReadAll(httpResponse.Body)
+			httpResponse.Body.Close()
+			retErr = fmt.Errorf("Http code %d, message %s!", httpResponse.StatusCode, message)
+			if httpResponse.StatusCode == 404 {
+				ret := readRetPool.Get().(*ReadRet)
+				ret.Init(realFileId, 0, nil, CODE_NOT_FOUND)
+				return ret, CODE_NOT_FOUND, retErr
+			} else if httpResponse.StatusCode >= 500 {
+				continue
+			}
+			return nil, CODE_EMPTY, retErr
 		}
-		return nil, CODE_EMPTY, err
 	}
 
-	return nil, CODE_EMPTY, err
+	return nil, CODE_EMPTY, retErr
 }

@@ -35,6 +35,7 @@ type ReadRet struct {
 	Body     io.ReadCloser
 	Code     ErrorCode
 	Md5val   string
+    Type     utils.ReaderAllocType
 }
 
 func (r *ReadRet) Init(fileId uint32, size uint64, body io.ReadCloser, code ErrorCode) {
@@ -59,12 +60,13 @@ func PutReadRet(r *ReadRet) {
 }
 
 type FileNode struct {
-	FileId   uint32
-	Cached   bool
-	NotExist bool
-	FileSize uint64
-	Body     *utils.RefReadCloserBase
-	Md5val   string
+	FileId     uint32
+	Cached     bool
+	NotExist   bool
+	FileSize   uint64
+	Body       *utils.RefReadCloserBase
+	Md5val     string
+	AollocType utils.ReaderAllocType
 }
 
 func (f *FileNode) Release() uint64 {

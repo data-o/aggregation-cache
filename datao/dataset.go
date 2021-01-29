@@ -373,7 +373,12 @@ func (g *Group) doChangeDLTMaster(mg *DLTGroup) error {
 			return fmt.Errorf("Warning file not in cached file lists")
 		}
 
-		mg.readedCachedFiles.put(fileId)
+		// add to diff queue
+		if node.AollocType == utils.ALLOC_TYPE_EXTR || node.AollocType == utils.ALLOC_TYPE_NEW {
+			mg.readedPriorityCachedFiles.put(fileId)
+		} else {
+			mg.readedCachedFiles.put(fileId)
+		}
 		mg.readedCachedFileNum++
 	}
 	return nil
@@ -381,7 +386,7 @@ func (g *Group) doChangeDLTMaster(mg *DLTGroup) error {
 
 // must be protect by the lock of master group
 func (g *Group) addFileToCache(mg *DLTGroup, fileId uint32, fileSize uint64, md5val string,
-	body *utils.RefReadCloserBase, notExist, isPreread bool) {
+	body *utils.RefReadCloserBase, aType utils.ReaderAllocType, notExist, isPreread bool) {
 	var (
 		isReaded bool
 	)
@@ -402,28 +407,41 @@ func (g *Group) addFileToCache(mg *DLTGroup, fileId uint32, fileSize uint64, md5
 	if node != nil {
 		g.cachedSize -= node.Save(fileId, fileSize, body, notExist) // may release old cache
 		node.Md5val = md5val
+		node.AollocType = aType
 	} else {
 		node = &FileNode{
-			FileId:   fileId,
-			Cached:   true,
-			NotExist: notExist,
-			FileSize: fileSize,
-			Body:     body,
-			Md5val:   md5val,
+			FileId:     fileId,
+			Cached:     true,
+			NotExist:   notExist,
+			FileSize:   fileSize,
+			Body:       body,
+			Md5val:     md5val,
+			AollocType: aType,
 		}
 		g.dataset.cachedFiles[fileId] = node
 	}
 	g.cachedSize += fileSize
 
 	if isReaded {
-		mg.readedCachedFiles.put(fileId) // may core
+		// add to diff queue
+		if aType == utils.ALLOC_TYPE_EXTR || aType == utils.ALLOC_TYPE_NEW {
+			mg.readedPriorityCachedFiles.put(fileId)
+		} else {
+			mg.readedCachedFiles.put(fileId)
+		}
 		mg.readedCachedFileNum++
 		g.dataset.addCachedFileToSlave(g.id, fileId)
 		LogFromtln("Warning it has been readed", fileId)
 	} else if mg.dlt.cachedFilesCache[fileId] == 0 { // not cached
-		mg.cachedFiles[mg.cachedFileNum] = fileId
-		mg.cachedFileNum++
-		mg.dlt.cachedFilesCache[fileId] = mg.cachedFileNum
+		if aType == utils.ALLOC_TYPE_EXTR || aType == utils.ALLOC_TYPE_NEW {
+			mg.highPriorityCaches[mg.highPriorityNum] = fileId
+			mg.highPriorityNum++
+			mg.dlt.cachedFilesCache[fileId] = mg.highPriorityNum + PRIORITY_GAP_BASE
+		} else {
+			mg.cachedFiles[mg.cachedFileNum] = fileId
+			mg.cachedFileNum++
+			mg.dlt.cachedFilesCache[fileId] = mg.cachedFileNum
+		}
 		if mg.hasWiated > 0 {
 			mg.condWaitCache.Signal()
 		}
@@ -433,12 +451,28 @@ func (g *Group) addFileToCache(mg *DLTGroup, fileId uint32, fileSize uint64, md5
 	}
 }
 
+func (g *Group) releaseNode(fileId uint32) {
+	if len(g.dataset.dlts) > 0 {
+		g.dataset.removeCachedFileToSlave(g.id, fileId)
+	}
+
+	if node := g.dataset.cachedFiles[fileId]; node != nil {
+		node.Release()
+	}
+}
+
 // should protect by the lock of master group
 // mg: master DLTGroup
 func (g *Group) releaseMem(mg *DLTGroup, force bool) {
-	if mg.readedCachedFileNum == 0 { // don't have cache
-		return
-	} else if mg.unreadFileNum == 0 {
+	if mg.readedCachedFileNum == 0 || mg.unreadFileNum == 0 {
+		// try release priority cached files
+		for !mg.readedPriorityCachedFiles.empty() {
+			fileId, ok := mg.readedPriorityCachedFiles.get()
+			if !ok {
+				return
+			}
+			g.releaseNode(fileId)
+		}
 		return
 	}
 
@@ -457,39 +491,28 @@ func (g *Group) releaseMem(mg *DLTGroup, force bool) {
 
 		for i := uint32(0); mg.readedCachedFileNum > 0 && i < releaseNum; i++ {
 			mg.readedCachedFileNum--
-			fileId, ok := mg.readedCachedFiles.get()
+			fileId, ok := mg.readedPriorityCachedFiles.get()
 			if !ok {
-				panic("Error: don't have node in readed queue")
+				fileId, ok = mg.readedCachedFiles.get()
+				if !ok {
+					panic("Error: don't have node in readed queue")
+				}
 			}
-
-			if len(g.dataset.dlts) > 0 {
-				g.dataset.removeCachedFileToSlave(g.id, fileId)
-			}
-
-			node := g.dataset.cachedFiles[fileId]
-			if node == nil {
-				continue
-			}
-			node.Release()
+			g.releaseNode(fileId)
 		}
 
 		// try release more node
 		for mg.readedCachedFileNum > 0 && !g.bm.Reserve(needBlock) {
 			mg.readedCachedFileNum--
-			fileId, ok := mg.readedCachedFiles.get()
+
+			fileId, ok := mg.readedPriorityCachedFiles.get()
 			if !ok {
-				panic("Error: don't have node in readed queue 1")
+				fileId, ok = mg.readedCachedFiles.get()
+				if !ok {
+					panic("Error: don't have node in readed queue 1")
+				}
 			}
-
-			if len(g.dataset.dlts) > 0 {
-				g.dataset.removeCachedFileToSlave(g.id, fileId)
-			}
-
-			node := g.dataset.cachedFiles[fileId]
-			if node == nil {
-				continue
-			}
-			node.Release()
+			g.releaseNode(fileId)
 		}
 	}
 }

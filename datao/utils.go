@@ -64,7 +64,12 @@ func (f *FIFO) get() (uint32, bool) {
 
 	val := f.queue[f.start]
 	f.start = (f.start + 1) % f.length
+	f.nodeNum--
 	return val, true
+}
+
+func (f *FIFO) empty() bool {
+	return (f.nodeNum == 0)
 }
 
 func (f *FIFO) clear() {

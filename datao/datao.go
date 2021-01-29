@@ -49,13 +49,17 @@ type DLTGroup struct {
 	unreadFileNum uint32
 	unreadFiles   []uint32
 
-	readedCachedFileNum uint32 // don't contail unreaded files
-	readedCachedFiles   *FIFO
+	readedCachedFileNum       uint32 // don't contail unreaded files
+	readedCachedFiles         *FIFO
+	readedPriorityCachedFiles *FIFO
 
 	prereadFileNum uint32
 
 	cachedFileNum uint32   // don't contail unreaded files
 	cachedFiles   []uint32 // value is file id
+
+	highPriorityNum    uint32
+	highPriorityCaches []uint32
 
 	retQueue chan *ReadRet
 
@@ -71,9 +75,10 @@ type DLT struct {
 
 	isMaster bool
 
-	readFromCache uint32
-	readDirectly  uint32
-	waitRead      uint32
+	readFromCache     uint32
+	readDirectly      uint32
+	waitRead          uint32
+	readPriorityCache uint32
 
 	trainEpoch int32
 	valEpoch   int32
@@ -117,8 +122,11 @@ func (t *DLT) init(dataset *Dataset, isMaster bool) error {
 		g.dlt = t
 		g.group = group
 		g.readedCachedFiles = NewFIFO(int(group.fileNum))
+		g.readedPriorityCachedFiles = NewFIFO(int(group.fileNum))
+
 		g.unreadFiles = make([]uint32, group.fileNum)
 		g.cachedFiles = make([]uint32, group.fileNum)
+		g.highPriorityCaches = make([]uint32, group.fileNum)
 		g.retQueue = make(chan *ReadRet, dconfig.ConfGroupRetQueueLength)
 
 		// choose endpoint
@@ -163,14 +171,22 @@ func (t *DLT) initCachedFiles(dataset *Dataset, isMaster bool) {
 		}
 
 		g.cachedFileNum = 0
+		g.highPriorityNum = 0
 		g.unreadFileNum = 0
 
 		for j := group.startId; j <= group.endId; j++ {
 			node := dataset.cachedFiles[j]
 			if node != nil && node.Cached {
-				g.cachedFiles[g.cachedFileNum] = j
-				g.cachedFileNum++
-				g.dlt.cachedFilesCache[j] = g.cachedFileNum
+				if node.AollocType == utils.ALLOC_TYPE_NEW ||
+					node.AollocType == utils.ALLOC_TYPE_EXTR {
+					g.highPriorityCaches[g.highPriorityNum] = j
+					g.highPriorityNum++
+					g.dlt.cachedFilesCache[j] = g.highPriorityNum + PRIORITY_GAP_BASE
+				} else {
+					g.cachedFiles[g.cachedFileNum] = j
+					g.cachedFileNum++
+					g.dlt.cachedFilesCache[j] = g.cachedFileNum
+				}
 				cachedNum++
 			} else {
 				g.unreadFiles[g.unreadFileNum] = j
@@ -196,8 +212,8 @@ func (t *DLT) GetFileId(fileName string) (uint32, bool) {
 	return t.dataset.GetFileId(fileName)
 }
 
-func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.ReadCloser, ErrorCode,
-	error) {
+func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string,
+	io.ReadCloser, ErrorCode, error) {
 
 	var (
 		retFileId   uint32
@@ -218,9 +234,6 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 	if !ok {
 		return 0, 0, "", nil, CODE_NOT_FOUND, fmt.Errorf("Not Found")
 	}
-
-	// 	startTime := time.Now().UnixNano()
-	// 	readKind := 1
 
 	// get group id
 	groupId := t.dataset.fileIdToGroups[fileId]
@@ -244,7 +257,7 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 		}
 	}
 
-	if group.cachedFileNum > 0 { // have cache, read from cache
+	if group.cachedFileNum > 0 || group.highPriorityNum > 0 { // have cache, read from cache
 		node, err := t.getFileFromCache(fileId, group)
 		if err != nil {
 			return 0, 0, "", nil, CODE_EMPTY, err
@@ -286,8 +299,6 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 	} else if (dconfig.ConfTryReadDirect || !t.isMaster) && group.unreadFileNum > 0 {
 		// if we are not the master DLT, try read unreaded file from backend
 		// if we are master and have unreaded file, try to read it directly
-		// 		readKind = 3
-
 		// don't have cache
 		tempId := fileId
 		if group.readedFilesCache.Get(fileId-group.group.startId) || // maybe replaced
@@ -295,7 +306,8 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 			tempId, ok = group.getRandomUnreadedFile()
 			if !ok {
 				return 0, 0, "", nil, CODE_EMPTY,
-					fmt.Errorf("don't have unreaded file, but unreadFileNum is %d", group.unreadFileNum)
+					fmt.Errorf("don't have unreaded file, but unreadFileNum is %d",
+						group.unreadFileNum)
 			}
 		} else {
 			// remove from unread files
@@ -304,7 +316,7 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 
 		// try to read from endpoint
 		group.lock.Unlock()
-		ret, code, err = group.readFromBackend(tempId, true)
+		ret, code, err = group.readFromBackend(tempId, true, false)
 		// maybe , we can cache all files
 		group.lock.Lock()
 		if code != CODE_OK && code != CODE_NOT_FOUND {
@@ -327,14 +339,14 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 
 		t.readDirectly++
 	} else if group.unreadFileNum > 0 || group.prereadFileNum > 0 { // waiting for preread
-		// 		readKind = 2
 		group.hasWiated += 1
 		for true {
 			group.condWaitCache.Wait()
-			if group.cachedFileNum > 0 {
+			if group.cachedFileNum > 0 || group.highPriorityNum > 0 {
 				break
 			}
-			LogFromtln(group.group.id, "End", group.unreadFileNum, group.prereadFileNum, group.cachedFileNum, fileId)
+			LogFromtln(group.group.id, "End", group.unreadFileNum, group.prereadFileNum,
+				group.cachedFileNum, fileId)
 		}
 		group.hasWiated -= 1
 		// try to read from cache
@@ -382,7 +394,8 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 		} else if ok {
 			return 0, 0, "", nil, CODE_AGAIN, nil
 		}
-		return 0, 0, "", nil, CODE_EMPTY, fmt.Errorf("don't have unread file, when try to read %d", fileId)
+		return 0, 0, "", nil, CODE_EMPTY,
+			fmt.Errorf("don't have unread file, when try to read %d", fileId)
 	}
 
 	if group.group.id >= t.dataset.trainGroupNum { // read from val
@@ -400,20 +413,17 @@ func (t *DLT) Get(fileName string, replace bool) (uint32, uint64, string, io.Rea
 	}
 
 	if (t.trainReadedNum+t.valReadedNum)%100000 == 0 {
-		LogFromtln("Job", t.id, "ReadType", t.readFromCache, t.readDirectly, t.waitRead, "cached", t.dataset.cachedNum())
+		LogFromtln("Job", t.id, "ReadType", t.readFromCache, t.readPriorityCache,
+			t.readDirectly, t.waitRead)
 	}
 
 	t.replaceFilesIndex[fileId] = retFileId + 1
 
-	// 	if readKind == 2 || readKind == 3 {
-	// 		useTime := (time.Now().UnixNano() - startTime) / 1000 // us
-	// 		LogFromtln("group", group.group.id, "file num get", fileName, retFileId, "use", useTime, "us")
-	// 	}
-
 	return retFileId, retFileSize, retMd5val, retBody, code, err
 }
 
-func (t *DLT) processReadDirect(fileName string, realId uint32, group *DLTGroup) (uint32, uint64, string,
+func (t *DLT) processReadDirect(fileName string, realId uint32,
+	group *DLTGroup) (uint32, uint64, string,
 	io.ReadCloser, ErrorCode, error) {
 
 	// try read from cache
@@ -430,7 +440,7 @@ func (t *DLT) processReadDirect(fileName string, realId uint32, group *DLTGroup)
 	// try read from backend
 	LogFromtln("server Repeat read from backend ", fileName)
 	// read without replace
-	ret, code, err := group.readFromBackend(realId, false)
+	ret, code, err := group.readFromBackend(realId, false, false)
 
 	defer readRetPool.Put(ret)
 	// don't add to cache
@@ -450,8 +460,8 @@ func (t *DLT) getFileFromCache(fileId uint32, group *DLTGroup) (*FileNode, error
 	)
 
 	tempId := fileId
-
-	if group.readedFilesCache.Get(fileId - group.group.startId) { // have been replace, return a random file
+	if group.readedFilesCache.Get(fileId - group.group.startId) {
+		// have been replace, return a random file
 		tempId, ok = group.getRandomCachedFile()
 		if !ok {
 			return nil, fmt.Errorf("can't get cached file")
@@ -584,29 +594,61 @@ func (t *DLT) tryNotifyAllGroup() {
 
 // must have enough cache
 func (g *DLTGroup) getRandomCachedFile() (uint32, bool) {
-	randNum := rand.Uint32() % g.cachedFileNum
-	fileId := g.cachedFiles[randNum]
+	var (
+		randNum uint32
+		fileId  uint32
+	)
+
+	if g.highPriorityNum > 0 {
+		randNum = rand.Uint32() % g.highPriorityNum
+		fileId = g.highPriorityCaches[randNum]
+		randNum += PRIORITY_GAP_BASE
+	} else {
+		randNum = rand.Uint32() % g.cachedFileNum
+		fileId = g.cachedFiles[randNum]
+	}
+
 	g.markCachedFileReaded(fileId, randNum)
+
 	return fileId, true
 }
 
 // mark file is readed
 func (g *DLTGroup) markCachedFileReaded(fileId, index uint32) {
 	// mark this file is readed from cache
-	g.readedCachedFiles.put(fileId)
+	node := g.dlt.dataset.cachedFiles[fileId]
+	if node == nil {
+		fmt.Println("the cache if file id", fileId, "is nil")
+		panic("file is not cached")
+	}
+
+	// add to diff queue
+	if node.AollocType == utils.ALLOC_TYPE_EXTR || node.AollocType == utils.ALLOC_TYPE_NEW {
+		g.readedPriorityCachedFiles.put(fileId)
+	} else {
+		g.readedCachedFiles.put(fileId)
+	}
+
 	g.readedCachedFileNum++
 
 	// move last cahce Id, fill in gap
-	lastId := g.cachedFileNum - 1
-
-	if index != lastId {
-		g.cachedFiles[index] = g.cachedFiles[lastId]
-		g.dlt.cachedFilesCache[g.cachedFiles[lastId]] = (index + 1)
+	if index < PRIORITY_GAP_BASE {
+		g.cachedFileNum--
+		if index != g.cachedFileNum {
+			g.cachedFiles[index] = g.cachedFiles[g.cachedFileNum]
+			g.dlt.cachedFilesCache[g.cachedFiles[g.cachedFileNum]] = (index + 1)
+		}
+	} else {
+		reIndex := index - PRIORITY_GAP_BASE
+		g.highPriorityNum--
+		if reIndex != g.highPriorityNum {
+			g.highPriorityCaches[reIndex] = g.highPriorityCaches[g.highPriorityNum]
+			g.dlt.cachedFilesCache[g.highPriorityCaches[g.highPriorityNum]] = (index + 1)
+		}
+		g.dlt.readPriorityCache++
 	}
-
 	// mark this file is readed
 	g.dlt.cachedFilesCache[fileId] = 0
-	g.cachedFileNum--
 }
 
 // on condition that cache is empty
@@ -695,14 +737,24 @@ func (g *DLTGroup) moveFromCachedToUnread(fileId uint32) bool {
 		return false
 	}
 
-	lastId := g.cachedFileNum
-	if index != lastId {
-		g.cachedFiles[index-1] = g.cachedFiles[lastId-1]
-		g.dlt.cachedFilesCache[g.cachedFiles[lastId-1]] = index
+	if index < PRIORITY_GAP_BASE {
+		lastId := g.cachedFileNum
+		if index != lastId {
+			g.cachedFiles[index-1] = g.cachedFiles[lastId-1]
+			g.dlt.cachedFilesCache[g.cachedFiles[lastId-1]] = index
+		}
+		g.cachedFileNum--
+	} else {
+		lastId := g.highPriorityNum
+		reIndex := index - PRIORITY_GAP_BASE
+		if reIndex != lastId {
+			g.highPriorityCaches[reIndex-1] = g.highPriorityCaches[lastId-1]
+			g.dlt.cachedFilesCache[g.highPriorityCaches[lastId-1]] = reIndex
+		}
+		g.highPriorityNum--
 	}
 
 	g.dlt.cachedFilesCache[fileId] = 0
-	g.cachedFileNum--
 
 	return g.addUnreadedFile(fileId, 10)
 }
@@ -729,13 +781,13 @@ func (g *DLTGroup) sendBitmapToBackend() error {
 }
 
 // should not be lock
-func (g *DLTGroup) readFromBackend(fileId uint32, replace bool) (*ReadRet, ErrorCode, error) {
+func (g *DLTGroup) readFromBackend(fileId uint32, replace, needCache bool) (*ReadRet, ErrorCode, error) {
 	// build request
 	dataset := g.dlt.dataset
 
 	// start get file from backend
-	ret, code, err := readFromBackend(g.dlt.dataset, dataset.httpClient, g.endpoint, dataset.id,
-		fileId, g.group.id, g.dlt.id, replace)
+	ret, code, err := readFromBackend(g.dlt.dataset, g.group, dataset.httpClient, g.endpoint,
+		fileId, g.dlt.id, replace, needCache)
 
 	return ret, code, err
 }
@@ -745,8 +797,10 @@ func (g *DLTGroup) NewEpochClear(epoch int32) bool {
 		return false
 	}
 
-	if g.unreadFileNum != 0 || g.prereadFileNum != 0 && g.cachedFileNum != 0 {
-		LogFromtln("Error unreadFileNum is", g.unreadFileNum, "prereadFileNum is", g.prereadFileNum)
+	if g.unreadFileNum != 0 || g.prereadFileNum != 0 || g.cachedFileNum != 0 ||
+		g.highPriorityNum != 0 {
+		LogFromtln("Error unreadFileNum is", g.unreadFileNum, "prereadFileNum is",
+			g.prereadFileNum)
 		return false
 	}
 
@@ -756,9 +810,11 @@ func (g *DLTGroup) NewEpochClear(epoch int32) bool {
 	g.readedFilesCache.Clear()
 	g.unreadFileNum = 0
 	g.cachedFileNum = 0
+	g.highPriorityNum = 0
 	g.prereadFileNum = 0
 	g.readedCachedFileNum = 0
 	g.readedCachedFiles.clear()
+	g.readedPriorityCachedFiles.clear()
 
 	g.groupEpoch = epoch
 

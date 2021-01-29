@@ -72,7 +72,7 @@ var (
 )
 
 func (w *worker) ReadOne(job *jobInfo) {
-	ret, code, err := job.group.readFromBackend(job.fileId, true)
+	ret, code, err := job.group.readFromBackend(job.fileId, true, true)
 	if code != CODE_OK {
 		LogFromtln("failed read", job.fileId, code, err)
 	}

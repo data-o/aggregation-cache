@@ -131,7 +131,12 @@ func (m *DatasetManager) Start(datasetMapPath, bucketName string, jobId uint32) 
 	}
 
 	dlt, err = dataset.newJob(jobId, m.clientType)
+	if err != nil {
+		return nil, err
+	}
+
 	m.dlts[jobId] = dlt
+
 	return dlt, nil
 }
 

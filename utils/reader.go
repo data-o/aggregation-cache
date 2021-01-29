@@ -28,7 +28,14 @@ const (
 	EXTR_MEM_POOL_START  = 20000000000
 	EXTR_POOL_START      = 30000000000
 	POOL_TYPE_MASK       = 10000000000
+
+	ALLOC_TYPE_NONE   = 10000
+	ALLOC_TYPE_NORMAL = 10001 // alloc from memory pool
+	ALLOC_TYPE_EXTR   = 10002 // alloc from extra memory pool
+	ALLOC_TYPE_NEW    = 10003 // alloc new node from system
 )
+
+type ReaderAllocType int
 
 type Callback interface {
 	Call(uint64) error
@@ -141,6 +148,10 @@ func (b *BlockManage) Reserve(blockNum int64) bool {
 	return false
 }
 
+func (b *BlockManage) GetFreeSize() int64 {
+	return b.freeBlock
+}
+
 func (b *BlockManage) WaitMem(blockNum int64) {
 	if atomic.LoadInt64(&b.freeBlock) > blockNum+b.extrBlock {
 		return
@@ -242,12 +253,12 @@ type MemBlocks struct {
 	extrBlockNum int64
 
 	dataMap []int64 // 0xxxx block  1xxxx extrPoolBlocks 2xxx extrBlocks
-	mapNum  int64
 
 	size uint64
 }
 
-func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadCloser) (uint64, error) {
+func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadCloser) (uint64,
+	ReaderAllocType, error) {
 	var (
 		n        int
 		readed   uint64
@@ -268,7 +279,8 @@ func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadClose
 	m.extrBm = extrBm
 	m.size = size
 
-	defer data.Close()
+	extrBmNum := 0
+	poolBmBum := 0
 
 	for readed < size {
 		// try get from self bm
@@ -287,7 +299,6 @@ func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadClose
 				if n > 0 {
 					readed += uint64(n)
 					m.dataMap = append(m.dataMap, MEM_POOL_START+m.usedBlockNum)
-					m.mapNum++
 					m.usedBlockNum++
 				} else if err != nil {
 					break
@@ -305,6 +316,8 @@ func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadClose
 				needByte = int(size - readed)
 			}
 
+			extrBmNum++
+
 			startId := blockId * ConfMempoolBlockSize
 			endId := startId + int64(needByte)
 
@@ -313,7 +326,6 @@ func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadClose
 				readed += uint64(n)
 				m.extrPoolBlocks = append(m.extrPoolBlocks, blockId)
 				m.dataMap = append(m.dataMap, EXTR_MEM_POOL_START+m.extrPoolBlockNum)
-				m.mapNum++
 				m.extrPoolBlockNum++
 			}
 		} else {
@@ -321,6 +333,7 @@ func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadClose
 				m.extrBlocks = make([]*Block, 0, 4)
 			}
 
+			poolBmBum++
 			block := blocksPool.Get().(*Block)
 			needByte := ConfMempoolBlockSize
 			if readed+ConfMempoolBlockSize > size {
@@ -331,26 +344,32 @@ func (m *MemBlocks) Init(bm, extrBm *BlockManage, size uint64, data io.ReadClose
 				readed += uint64(n)
 				m.extrBlocks = append(m.extrBlocks, block)
 				m.dataMap = append(m.dataMap, EXTR_POOL_START+m.extrBlockNum)
-				m.mapNum++
 				m.extrBlockNum++
 			}
 		}
 
 		if err != nil && err != io.EOF { // at end
-			return readed, err
+			return readed, ALLOC_TYPE_NONE, err
 		} else if err == io.EOF {
 			err = nil
 			break
 		} else if n == 0 {
-			return 0, fmt.Errorf("Read 0 bytes, but error is not EOF")
+			return 0, ALLOC_TYPE_NONE, fmt.Errorf("Read 0 bytes, but error is not EOF")
 		}
 	}
 
 	if readed != size {
-		return 0, fmt.Errorf("only read %d byte from ReadCloser instead of %d", readed, size)
+		return 0, ALLOC_TYPE_NONE,
+			fmt.Errorf("only read %d byte from ReadCloser instead of %d", readed, size)
 	}
 
-	return readed, nil
+	if poolBmBum > 0 {
+		return readed, ALLOC_TYPE_NEW, nil
+	} else if extrBmNum > 0 {
+		return readed, ALLOC_TYPE_EXTR, nil
+	}
+
+	return readed, ALLOC_TYPE_NORMAL, nil
 }
 
 // return the release size of mempool
@@ -381,7 +400,6 @@ func (m *MemBlocks) Release(notify bool) {
 	m.extrBlocks = m.extrBlocks[:0]
 	m.extrBlockNum = 0
 	m.dataMap = m.dataMap[:0]
-	m.mapNum = 0
 	m.size = 0
 }
 
@@ -434,24 +452,27 @@ func (m *MemBlocks) Read(b []byte, off int64) (int, error) {
 }
 
 // copy data from http respose body to []byte
+// id is file id
 func NewRefReadCloserBase(id uint32, bm, extrBm *BlockManage, size uint64,
-	body io.ReadCloser) (*RefReadCloserBase, error) {
+	body io.ReadCloser) (*RefReadCloserBase, ReaderAllocType, error) {
 
 	r := readerPool.Get().(*RefReadCloserBase)
 
-	r.id = id
+	r.fileId = id
+	r.groupId = bm.id
 	r.fileSize = size
 	r.ref = 1
 	r.isClose = false
 	r.blocks = memBlockPool.Get().(*MemBlocks)
-	n, err := r.blocks.Init(bm, extrBm, size, body)
+	n, aType, err := r.blocks.Init(bm, extrBm, size, body)
 	if err != nil {
-		return nil, err
+		return nil, ALLOC_TYPE_NONE, err
 	} else if n != size {
-		return nil, fmt.Errorf("read %d bytes from body. but expect %d bytes", n, size)
+		return nil, ALLOC_TYPE_NONE,
+			fmt.Errorf("read %d bytes from body. but expect %d bytes", n, size)
 	}
 
-	return r, nil
+	return r, aType, nil
 }
 
 var readerPool = sync.Pool{
@@ -467,7 +488,8 @@ var memBlockPool = sync.Pool{
 }
 
 type RefReadCloserBase struct {
-	id       uint32
+	fileId   uint32
+	groupId  uint32
 	blocks   *MemBlocks
 	fileSize uint64
 	ref      int32
@@ -545,6 +567,11 @@ func (r *RefReadCloserBase) NewReadCloser() (io.ReadCloser, error) {
 	closer.off = 0
 	closer.base = r
 	return closer, nil
+}
+
+func (r *RefReadCloserBase) Read(b []byte) (n int, err error) {
+	panic("RefReadCloserBase not support read")
+	return 0, nil
 }
 
 type RefReadCloser struct {

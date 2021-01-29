@@ -17,6 +17,10 @@ import (
 	"io"
 )
 
+import (
+	"github.com/data-o/aggregation-cache/utils"
+)
+
 type ServerCacheGroup struct {
 }
 
@@ -50,14 +54,26 @@ func (s *ServerCacheGroup) NewEpoch(g *DLTGroup, epoch int32, cachedBitmap []byt
 				// mark this file have been read (maybe replaceed by other file)
 				g.readedFilesReal.Set(offset)
 				g.dlt.replaceFilesIndex[i] = i + 1
-				g.readedCachedFiles.put(i)
+				if node.AollocType == utils.ALLOC_TYPE_NEW ||
+					node.AollocType == utils.ALLOC_TYPE_EXTR {
+					g.readedPriorityCachedFiles.put(i)
+				} else {
+					g.readedCachedFiles.put(i)
+				}
 				g.readedCachedFileNum++
 			} else {
 				num++
 				// set cache
-				g.cachedFiles[g.cachedFileNum] = i
-				g.cachedFileNum++
-				g.dlt.cachedFilesCache[i] = g.cachedFileNum
+				if node.AollocType == utils.ALLOC_TYPE_NEW ||
+					node.AollocType == utils.ALLOC_TYPE_EXTR {
+					g.highPriorityCaches[g.highPriorityNum] = i
+					g.highPriorityNum++
+					g.dlt.cachedFilesCache[i] = g.highPriorityNum + PRIORITY_GAP_BASE
+				} else {
+					g.cachedFiles[g.cachedFileNum] = i
+					g.cachedFileNum++
+					g.dlt.cachedFilesCache[i] = g.cachedFileNum
+				}
 				// clear unread file
 				g.dlt.unreadFilesIndexs[i] = 0
 				g.dlt.replaceFilesIndex[i] = 0
@@ -87,8 +103,8 @@ func (s *ServerCacheGroup) NewEpoch(g *DLTGroup, epoch int32, cachedBitmap []byt
 	return nil
 }
 
-func (s *ServerCacheGroup) ProcessRepeatRead(group *DLTGroup, fileName string, fileId uint32) (uint32,
-	uint64, string, io.ReadCloser, ErrorCode, error) {
+func (s *ServerCacheGroup) ProcessRepeatRead(group *DLTGroup, fileName string,
+	fileId uint32) (uint32, uint64, string, io.ReadCloser, ErrorCode, error) {
 	// have been readed?
 	if group.dlt.replaceFilesIndex[fileId] != 0 { // have read this object
 		realId := group.dlt.replaceFilesIndex[fileId] - 1
